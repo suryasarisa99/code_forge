@@ -1,4 +1,4 @@
-import 'dart:math';
+import 'dart:ui' as ui;
 
 import 'controller.dart';
 
@@ -15,6 +15,7 @@ class CodeForge extends StatefulWidget {
   final ScrollController? horizontalScrollController;
   final FocusNode? focusNode;
   final bool readOnly;
+  final TextStyle? textStyle;
 
   const CodeForge({
     super.key,
@@ -23,7 +24,8 @@ class CodeForge extends StatefulWidget {
     this.verticalScrollController,
     this.horizontalScrollController,
     this.focusNode,
-    this.readOnly = false
+    this.readOnly = false,
+    this.textStyle,
   });
 
   @override
@@ -140,6 +142,7 @@ class _CodeForgeState extends State<CodeForge> with SingleTickerProviderStateMix
                           _focusNode,
                           widget.readOnly,
                           _caretBlinkController,
+                          widget.textStyle,
                         ),
                       );
                     }
@@ -161,6 +164,7 @@ class _CodeField extends LeafRenderObjectWidget{
   final FocusNode focusNode;
   final bool readOnly;
   final AnimationController caretBlinkController;
+  final TextStyle? textStyle;
 
   const _CodeField(
     this.controller,
@@ -170,6 +174,7 @@ class _CodeField extends LeafRenderObjectWidget{
     this.focusNode,
     this.readOnly,
     this.caretBlinkController,
+    this.textStyle,
   );
 
   @override
@@ -182,6 +187,7 @@ class _CodeField extends LeafRenderObjectWidget{
       focusNode,
       readOnly,
       caretBlinkController,
+      textStyle,
     );
   }
 
@@ -199,8 +205,10 @@ class _CodeFieldRenderer extends RenderBox {
   final FocusNode focusNode;
   final bool readOnly;
   final AnimationController caretBlinkController;
+  final TextStyle? textStyle;
 
-  static const double _fixedLineHeight = 16.8;
+  late final double _lineHeight;
+  
   final Paint _caretPainter = Paint()
     ..color = Colors.black
     ..style = PaintingStyle.fill;
@@ -209,7 +217,23 @@ class _CodeFieldRenderer extends RenderBox {
   final Map<int, String> _lineTextCache = {};
   int _cachedLineCount = 0;
 
-  final Map<int, TextPainter> _tpCache = {};
+  final Map<int, ui.Paragraph> _paragraphCache = {};
+  
+  int _cachedCaretOffset = -1;
+  int _cachedCaretLine = 0;
+  int _cachedCaretLineStart = 0;
+  
+  late final ui.ParagraphStyle _paragraphStyle;
+  late final ui.TextStyle _uiTextStyle;
+  
+  ui.Paragraph _buildParagraph(String text) {
+    final builder = ui.ParagraphBuilder(_paragraphStyle)
+      ..pushStyle(_uiTextStyle)
+      ..addText(text.isEmpty ? ' ' : text);
+    final p = builder.build();
+    p.layout(const ui.ParagraphConstraints(width: double.infinity));
+    return p;
+  }
 
   _CodeFieldRenderer(
     this.controller,
@@ -219,7 +243,26 @@ class _CodeFieldRenderer extends RenderBox {
     this.focusNode,
     this.readOnly,
     this.caretBlinkController,
+    this.textStyle,
   ) {
+    final fontSize = textStyle?.fontSize ?? 14.0;
+    final fontFamily = textStyle?.fontFamily;
+    final color = textStyle?.color ?? Colors.black;
+    final lineHeightMultiplier = textStyle?.height ?? 1.2;
+    
+    _lineHeight = fontSize * lineHeightMultiplier;
+    
+    _paragraphStyle = ui.ParagraphStyle(
+      fontFamily: fontFamily,
+      fontSize: fontSize,
+      height: lineHeightMultiplier,
+    );
+    _uiTextStyle = ui.TextStyle(
+      color: color,
+      fontSize: fontSize,
+      fontFamily: fontFamily,
+    );
+    
     vscrollController.addListener(markNeedsPaint);
     hscrollController.addListener(markNeedsPaint);
     caretBlinkController.addListener(markNeedsPaint);
@@ -232,28 +275,28 @@ class _CodeFieldRenderer extends RenderBox {
       markNeedsPaint();
       return;
     }
+    
+    if (controller.bufferNeedsRepaint) {
+      controller.bufferNeedsRepaint = false;
+      markNeedsPaint();
+      return;
+    }
 
-    final dirtyRegion = controller.dirtyRegion;
     final newLineCount = controller.lineCount;
     final lineCountChanged = newLineCount != _cachedLineCount;
 
-    if (dirtyRegion != null) {
-      final startLine = controller.getLineAtOffset(dirtyRegion.start);
-      final endLine = controller.getLineAtOffset(max(0, dirtyRegion.end - 1));
-
-      for (int i = startLine; i <= endLine; i++) {
-        _lineWidthCache.remove(i);
-        _lineTextCache.remove(i);
-        _tpCache.remove(i);
-      }
-
-      controller.clearDirtyRegion();
+    final affectedLine = controller.dirtyLine;
+    if (affectedLine != null) {
+      _lineWidthCache.remove(affectedLine);
+      _lineTextCache.remove(affectedLine);
+      _paragraphCache.remove(affectedLine);
     }
+    controller.clearDirtyRegion();
 
     if (lineCountChanged) {
       _cachedLineCount = newLineCount;
       _lineTextCache.clear();
-      _tpCache.clear();
+      _paragraphCache.clear();
       markNeedsLayout();
     } else {
       markNeedsPaint();
@@ -263,62 +306,100 @@ class _CodeFieldRenderer extends RenderBox {
   int _findFirstVisibleLine(double viewTop) {
     final lineCount = controller.lineCount;
     if (lineCount == 0) return 0;
-    return (viewTop / _fixedLineHeight).floor().clamp(0, lineCount - 1);
+    return (viewTop / _lineHeight).floor().clamp(0, lineCount - 1);
   }
 
   int _findLastVisibleLine(double viewBottom) {
     final lineCount = controller.lineCount;
     if (lineCount == 0) return 0;
-    return (viewBottom / _fixedLineHeight).ceil().clamp(0, lineCount - 1);
+    return (viewBottom / _lineHeight).ceil().clamp(0, lineCount - 1);
   }
 
   int _findLineByYPosition(double y) {
     final lineCount = controller.lineCount;
     if (lineCount == 0) return 0;
-    return (y / _fixedLineHeight).floor().clamp(0, lineCount - 1);
+    return (y / _lineHeight).floor().clamp(0, lineCount - 1);
   }
 
   ({int lineIndex, int columnIndex, Offset offset, double height}) _getCaretInfo() {
-    final cursorOffset = controller.selection.extentOffset;
     final lineCount = controller.lineCount;
     if (lineCount == 0) {
-      return (lineIndex: 0, columnIndex: 0, offset: Offset.zero, height: _fixedLineHeight);
+      return (lineIndex: 0, columnIndex: 0, offset: Offset.zero, height: _lineHeight);
+    }
+    
+    if (controller.isBufferActive) {
+      final lineIndex = controller.bufferLineIndex!;
+      final columnIndex = controller.bufferCursorColumn;
+      final lineY = lineIndex * _lineHeight;
+      final lineText = controller.bufferLineText ?? '';
+      
+      final para = _buildParagraph(lineText);
+      final clampedCol = columnIndex.clamp(0, lineText.length);
+      double caretX = 0.0;
+      if (clampedCol > 0) {
+        final boxes = para.getBoxesForRange(0, clampedCol);
+        if (boxes.isNotEmpty) {
+          caretX = boxes.last.right;
+        }
+      }
+      
+      return (
+        lineIndex: lineIndex,
+        columnIndex: columnIndex,
+        offset: Offset(caretX, lineY),
+        height: _lineHeight,
+      );
     }
 
-    final lineIndex = controller.getLineAtOffset(cursorOffset);
-    final lineStartOffset = controller.getLineStartOffset(lineIndex);
+    final cursorOffset = controller.selection.extentOffset;
+    
+    int lineIndex;
+    int lineStartOffset;
+    if (cursorOffset == _cachedCaretOffset) {
+      lineIndex = _cachedCaretLine;
+      lineStartOffset = _cachedCaretLineStart;
+    } else {
+      lineIndex = controller.getLineAtOffset(cursorOffset);
+      lineStartOffset = controller.getLineStartOffset(lineIndex);
+      _cachedCaretOffset = cursorOffset;
+      _cachedCaretLine = lineIndex;
+      _cachedCaretLineStart = lineStartOffset;
+    }
+    
     final columnIndex = cursorOffset - lineStartOffset;
-    final lineY = lineIndex * _fixedLineHeight;
-
+    final lineY = lineIndex * _lineHeight;
+    
     String lineText;
     if (_lineTextCache.containsKey(lineIndex)) {
       lineText = _lineTextCache[lineIndex]!;
     } else {
       lineText = controller.getLineText(lineIndex);
       _lineTextCache[lineIndex] = lineText;
-      _tpCache.remove(lineIndex);
+      _paragraphCache.remove(lineIndex);
     }
 
-    TextPainter tp;
-    if (_tpCache.containsKey(lineIndex)) {
-      tp = _tpCache[lineIndex]!;
+    ui.Paragraph para;
+    if (_paragraphCache.containsKey(lineIndex)) {
+      para = _paragraphCache[lineIndex]!;
     } else {
-      tp = TextPainter(textDirection: TextDirection.ltr);
-      tp.text = TextSpan(text: lineText, style: const TextStyle(fontSize: 14));
-      tp.layout();
-      _tpCache[lineIndex] = tp;
+      para = _buildParagraph(lineText);
+      _paragraphCache[lineIndex] = para;
     }
-
-    final caretOffsetInLine = tp.getOffsetForCaret(
-      TextPosition(offset: columnIndex.clamp(0, lineText.length)),
-      Rect.zero,
-    );
+    
+    final clampedCol = columnIndex.clamp(0, lineText.length);
+    double caretX = 0.0;
+    if (clampedCol > 0) {
+      final boxes = para.getBoxesForRange(0, clampedCol);
+      if (boxes.isNotEmpty) {
+        caretX = boxes.last.right;
+      }
+    }
 
     return (
       lineIndex: lineIndex,
       columnIndex: columnIndex,
-      offset: Offset(caretOffsetInLine.dx, lineY),
-      height: _fixedLineHeight,
+      offset: Offset(caretX, lineY),
+      height: _lineHeight,
     );
   }
 
@@ -334,25 +415,24 @@ class _CodeFieldRenderer extends RenderBox {
     } else {
       lineText = controller.getLineText(tappedLineIndex);
       _lineTextCache[tappedLineIndex] = lineText;
-      _tpCache.remove(tappedLineIndex);
+      _paragraphCache.remove(tappedLineIndex);
     }
 
-    TextPainter tp;
-    if (_tpCache.containsKey(tappedLineIndex)) {
-      tp = _tpCache[tappedLineIndex]!;
+    // Use Paragraph to find position from tap coordinates
+    ui.Paragraph para;
+    if (_paragraphCache.containsKey(tappedLineIndex)) {
+      para = _paragraphCache[tappedLineIndex]!;
     } else {
-      tp = TextPainter(textDirection: TextDirection.ltr);
-      tp.text = TextSpan(text: lineText, style: const TextStyle(fontSize: 14));
-      tp.layout();
-      _tpCache[tappedLineIndex] = tp;
+      para = _buildParagraph(lineText);
+      _paragraphCache[tappedLineIndex] = para;
     }
-
-    final lineTop = tappedLineIndex * _fixedLineHeight;
+    
     final localX = position.dx;
-    final localY = position.dy - lineTop;
-    final textPosition = tp.getPositionForOffset(Offset(localX, localY));
+    final textPosition = para.getPositionForOffset(Offset(localX, _lineHeight / 2));
+    final columnIndex = textPosition.offset.clamp(0, lineText.length);
+    
     final lineStartOffset = controller.getLineStartOffset(tappedLineIndex);
-    final absoluteOffset = lineStartOffset + textPosition.offset;
+    final absoluteOffset = lineStartOffset + columnIndex;
 
     return absoluteOffset.clamp(0, controller.length);
   }
@@ -360,7 +440,7 @@ class _CodeFieldRenderer extends RenderBox {
   @override
   void performLayout() {
     final lineCount = controller.lineCount;
-    final contentHeight = lineCount * _fixedLineHeight + (innerPadding?.vertical ?? 0);
+    final contentHeight = lineCount * _lineHeight + (innerPadding?.vertical ?? 0);
 
     const estimatedMaxWidth = 2000.0;
     final contentWidth = estimatedMaxWidth + (innerPadding?.horizontal ?? 0);
@@ -376,37 +456,39 @@ class _CodeFieldRenderer extends RenderBox {
     final lineCount = controller.lineCount;
     final firstVisibleLine = _findFirstVisibleLine(viewTop);
     final lastVisibleLine = _findLastVisibleLine(viewBottom);
+    
+    final bufferActive = controller.isBufferActive;
+    final bufferLineIndex = controller.bufferLineIndex;
+    final bufferLineText = controller.bufferLineText;
 
     canvas.save();
     canvas.drawRect(offset & size, Paint()..color = Colors.white);
 
     for (int i = firstVisibleLine; i <= lastVisibleLine && i < lineCount; i++) {
-      final contentTop = i * _fixedLineHeight;
-
-      String lineText;
-      if (_lineTextCache.containsKey(i)) {
-        lineText = _lineTextCache[i]!;
+      final contentTop = i * _lineHeight;
+      
+      ui.Paragraph paragraph;
+      
+      if (bufferActive && i == bufferLineIndex && bufferLineText != null) {
+        paragraph = _buildParagraph(bufferLineText);
       } else {
-        lineText = controller.getLineText(i);
-        _lineTextCache[i] = lineText;
-        _tpCache.remove(i);
+        if (_paragraphCache.containsKey(i)) {
+          paragraph = _paragraphCache[i]!;
+        } else {
+          String lineText;
+          if (_lineTextCache.containsKey(i)) {
+            lineText = _lineTextCache[i]!;
+          } else {
+            lineText = controller.getLineText(i);
+            _lineTextCache[i] = lineText;
+          }
+          paragraph = _buildParagraph(lineText);
+          _paragraphCache[i] = paragraph;
+        }
       }
 
-      TextPainter tp;
-      if (_tpCache.containsKey(i)) {
-        tp = _tpCache[i]!;
-      } else {
-        tp = TextPainter(textDirection: TextDirection.ltr);
-        tp.text = TextSpan(
-          style: const TextStyle(color: Colors.black, fontSize: 14),
-          text: lineText
-        );
-        tp.layout(maxWidth: double.infinity);
-        _tpCache[i] = tp;
-      }
-
-      tp.paint(
-        canvas,
+      canvas.drawParagraph(
+        paragraph,
         offset + Offset(
           (innerPadding?.left ?? innerPadding?.right ?? 0) - hscrollController.offset,
           (innerPadding?.top ?? innerPadding?.bottom ?? 0) + contentTop - vscrollController.offset
