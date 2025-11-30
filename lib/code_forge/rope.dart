@@ -70,7 +70,6 @@ class Rope {
 
     _lineCache = null;
 
-    // Fast path for single character insert - try to append to existing leaf
     if (text.length == 1 && _root != null) {
       final inserted = _tryInsertInLeaf(_root!, position, text);
       if (inserted != null) {
@@ -80,23 +79,19 @@ class Rope {
       }
     }
 
-    // Standard path: split and concat
     final pair = _split(_root, position);
     final mid = _buildBalanced(text, 0, text.length);
     _root = _concat(_concat(pair.left, mid), pair.right);
     _length += text.length;
   }
 
-  // Try to insert a single char into an existing leaf without full split/concat
-  // Returns new node if successful, null if we should fall back to standard path
   _RopeNode? _tryInsertInLeaf(_RopeNode node, int position, String char) {
     if (node is _RopeLeaf) {
-      // Only optimize if leaf won't exceed max size
       if (node.text.length < _leafSize) {
         final newText = node.text.substring(0, position) + char + node.text.substring(position);
         return _RopeLeaf(newText);
       }
-      return null; // Leaf too big, use standard path
+      return null;
     } else if (node is _RopeConcat) {
       final leftLen = node.left.length;
       if (position <= leftLen) {
@@ -122,7 +117,6 @@ class Rope {
 
     _lineCache = null;
 
-    // Fast path for single character delete
     if (end - start == 1 && _root != null) {
       final deleted = _tryDeleteInLeaf(_root!, start);
       if (deleted != null) {
@@ -132,14 +126,12 @@ class Rope {
       }
     }
 
-    // Standard path
     final first = _split(_root, start);
     final second = _split(first.right, end - start);
     _root = _concat(first.left, second.right);
     _length -= (end - start);
   }
 
-  // Try to delete a single char from a leaf without full split/concat
   _RopeNode? _tryDeleteInLeaf(_RopeNode node, int position) {
     if (node is _RopeLeaf) {
       if (position >= 0 && position < node.text.length) {

@@ -23,6 +23,9 @@ class CodeForgeController implements DeltaTextInputClient {
   static const _flushDelay = Duration(milliseconds: 300);
   bool _bufferDirty = false;
   bool bufferNeedsRepaint = false;
+  
+  String? _lastSentText;
+  TextSelection? _lastSentSelection;
 
   String get text {
     if (_cachedText == null || _cachedTextVersion != _currentVersion) {
@@ -91,17 +94,43 @@ class CodeForgeController implements DeltaTextInputClient {
 
   set selection(TextSelection newSelection) {
     if (_selection == newSelection) return;
+    
+    _flushBuffer();
 
     _selection = newSelection;
     selectionOnly = true;
 
     if (connection != null && connection!.attached) {
+      _lastSentText = text;
+      _lastSentSelection = newSelection;
       connection!.setEditingState(TextEditingValue(
-        text: text,
+        text: _lastSentText!,
         selection: newSelection,
       ));
     }
 
+    notifyListeners();
+  }
+  
+  /// Update selection and sync to text input connection for keyboard navigation.
+  /// This flushes any pending buffer first to ensure IME state is consistent.
+  void setSelectionSilently(TextSelection newSelection) {
+    if (_selection == newSelection) return;
+    
+    _flushBuffer();
+    
+    _selection = newSelection;
+    selectionOnly = true;
+    
+    if (connection != null && connection!.attached) {
+      _lastSentText = text;
+      _lastSentSelection = newSelection;
+      connection!.setEditingState(TextEditingValue(
+        text: _lastSentText!,
+        selection: newSelection,
+      ));
+    }
+    
     notifyListeners();
   }
 
@@ -122,6 +151,18 @@ class CodeForgeController implements DeltaTextInputClient {
   @override
   void updateEditingValueWithDeltas(List<TextEditingDelta> textEditingDeltas) {
     for (final delta in textEditingDeltas) {
+      if (delta is TextEditingDeltaNonTextUpdate) {
+        if (_lastSentSelection == null || delta.selection != _lastSentSelection) {
+          _selection = delta.selection;
+        }
+        _lastSentSelection = null;
+        _lastSentText = null;
+        continue;
+      }
+      
+      _lastSentSelection = null;
+      _lastSentText = null;
+      
       if (delta is TextEditingDeltaInsertion) {
         _handleInsertion(delta.insertionOffset, delta.textInserted, delta.selection);
       } else if (delta is TextEditingDeltaDeletion) {
@@ -133,14 +174,19 @@ class CodeForgeController implements DeltaTextInputClient {
     notifyListeners();
   }
   
-  void _handleInsertion(int offset, String text, TextSelection newSelection) {  
-    if (text.contains('\n')) {
+  void _handleInsertion(int offset, String insertedText, TextSelection newSelection) {  
+    final currentLength = length;
+    if (offset < 0 || offset > currentLength) {
+      return;
+    }
+    
+    if (insertedText.contains('\n')) {
       _flushBuffer();
-      _rope.insert(offset, text);
+      _rope.insert(offset, insertedText);
       _currentVersion++;
       _selection = newSelection;
       dirtyLine = _rope.getLineAtOffset(offset);
-      dirtyRegion = TextRange(start: offset, end: offset + text.length);
+      dirtyRegion = TextRange(start: offset, end: offset + insertedText.length);
       return;
     }
     
@@ -149,38 +195,46 @@ class CodeForgeController implements DeltaTextInputClient {
       
       if (offset >= _bufferLineRopeStart && offset <= bufferEnd) {
         final localOffset = offset - _bufferLineRopeStart;
-        _bufferLineText = _bufferLineText!.substring(0, localOffset) + text
-          + _bufferLineText!.substring(localOffset);
-        _selection = newSelection;
-        _currentVersion++;
-        
-        bufferNeedsRepaint = true;
-        
-        _scheduleFlush();
-        return;
-      } else {
-        _flushBuffer();
+        if (localOffset >= 0 && localOffset <= _bufferLineText!.length) {
+          _bufferLineText = _bufferLineText!.substring(0, localOffset) + insertedText
+            + _bufferLineText!.substring(localOffset);
+          _selection = newSelection;
+          _currentVersion++;
+          
+          bufferNeedsRepaint = true;
+          
+          _scheduleFlush();
+          return;
+        }
       }
+      _flushBuffer();
     }
     
     final lineIndex = _rope.getLineAtOffset(offset);
     _initBuffer(lineIndex);
     
     final localOffset = offset - _bufferLineRopeStart;
-    _bufferLineText = _bufferLineText!.substring(0, localOffset) + text
-      + _bufferLineText!.substring(localOffset);
-    _bufferDirty = true;
-    _selection = newSelection;
-    _currentVersion++;
-    
-    bufferNeedsRepaint = true;
-    
-    _scheduleFlush();
+    if (localOffset >= 0 && localOffset <= _bufferLineText!.length) {
+      _bufferLineText = _bufferLineText!.substring(0, localOffset) + insertedText
+        + _bufferLineText!.substring(localOffset);
+      _bufferDirty = true;
+      _selection = newSelection;
+      _currentVersion++;
+      
+      bufferNeedsRepaint = true;
+      
+      _scheduleFlush();
+    }
   }
   
 
   
   void _handleDeletion(TextRange range, TextSelection newSelection) {
+    final currentLength = length;
+    if (range.start < 0 || range.end > currentLength || range.start > range.end) {
+      return;
+    }
+    
     final deleteLen = range.end - range.start;
     
     if (_bufferLineIndex != null && _bufferDirty) {
@@ -190,34 +244,37 @@ class CodeForgeController implements DeltaTextInputClient {
         final localStart = range.start - _bufferLineRopeStart;
         final localEnd = range.end - _bufferLineRopeStart;
         
-        final deletedText = _bufferLineText!.substring(localStart, localEnd);
-        if (deletedText.contains('\n')) {
-          _flushBuffer();
-          _rope.delete(range.start, range.end);
-          _currentVersion++;
+        if (localStart >= 0 && localEnd <= _bufferLineText!.length) {
+          final deletedText = _bufferLineText!.substring(localStart, localEnd);
+          if (deletedText.contains('\n')) {
+            _flushBuffer();
+            _rope.delete(range.start, range.end);
+            _currentVersion++;
+            _selection = newSelection;
+            dirtyLine = _rope.getLineAtOffset(range.start);
+            dirtyRegion = TextRange(start: range.start, end: range.start);
+            return;
+          }
+          
+          _bufferLineText = _bufferLineText!.substring(0, localStart) + 
+            _bufferLineText!.substring(localEnd);
           _selection = newSelection;
-          dirtyLine = _rope.getLineAtOffset(range.start);
-          dirtyRegion = TextRange(start: range.start, end: range.start);
+          _currentVersion++;
+          
+          bufferNeedsRepaint = true;
+          
+          _scheduleFlush();
           return;
         }
-        
-        _bufferLineText = _bufferLineText!.substring(0, localStart) + 
-          _bufferLineText!.substring(localEnd);
-        _selection = newSelection;
-        _currentVersion++;
-        
-        bufferNeedsRepaint = true;
-        
-        _scheduleFlush();
-        return;
-      } else {
-        _flushBuffer();
       }
+      _flushBuffer();
     }
     
     bool crossesNewline = false;
     if (deleteLen == 1) {
-      if (_rope.charAt(range.start) == '\n') crossesNewline = true;
+      if (range.start < _rope.length && _rope.charAt(range.start) == '\n') {
+        crossesNewline = true;
+      }
     } else {
       crossesNewline = true;
     }
@@ -236,15 +293,18 @@ class CodeForgeController implements DeltaTextInputClient {
     
     final localStart = range.start - _bufferLineRopeStart;
     final localEnd = range.end - _bufferLineRopeStart;
-    _bufferLineText = _bufferLineText!.substring(0, localStart) +
-      _bufferLineText!.substring(localEnd);
-    _bufferDirty = true;
-    _selection = newSelection;
-    _currentVersion++;
     
-    bufferNeedsRepaint = true;
-    
-    _scheduleFlush();
+    if (localStart >= 0 && localEnd <= _bufferLineText!.length) {
+      _bufferLineText = _bufferLineText!.substring(0, localStart) +
+        _bufferLineText!.substring(localEnd);
+      _bufferDirty = true;
+      _selection = newSelection;
+      _currentVersion++;
+      
+      bufferNeedsRepaint = true;
+      
+      _scheduleFlush();
+    }
   }
   
   void _handleReplacement(TextRange range, String text, TextSelection newSelection) {
@@ -309,6 +369,67 @@ class CodeForgeController implements DeltaTextInputClient {
   void clearDirtyRegion() {
     dirtyRegion = null;
     dirtyLine = null;
+  }
+  
+  /// Sync current state to the IME connection
+  void _syncToConnection() {
+    if (connection != null && connection!.attached) {
+      final currentText = text;
+      _lastSentText = currentText;
+      _lastSentSelection = _selection;
+      connection!.setEditingState(TextEditingValue(
+        text: currentText,
+        selection: _selection,
+      ));
+    }
+  }
+
+  /// Remove the selection or last char if the selection is empty (backspace key)
+  void backspace() {
+    _flushBuffer();
+    
+    final sel = _selection;
+    
+    if (sel.start < sel.end) {
+      _rope.delete(sel.start, sel.end);
+      _currentVersion++;
+      _selection = TextSelection.collapsed(offset: sel.start);
+      dirtyLine = _rope.getLineAtOffset(sel.start);
+    } else if (sel.start > 0) {
+      _rope.delete(sel.start - 1, sel.start);
+      _currentVersion++;
+      _selection = TextSelection.collapsed(offset: sel.start - 1);
+      dirtyLine = _rope.getLineAtOffset(sel.start - 1);
+    } else {
+      return;
+    }
+    
+    _syncToConnection();
+    notifyListeners();
+  }
+  
+  /// Remove the selection or the char at cursor position (delete key)
+  void delete() {
+    _flushBuffer();
+    
+    final sel = _selection;
+    final textLen = _rope.length;
+    
+    if (sel.start < sel.end) {
+      _rope.delete(sel.start, sel.end);
+      _currentVersion++;
+      _selection = TextSelection.collapsed(offset: sel.start);
+      dirtyLine = _rope.getLineAtOffset(sel.start);
+    } else if (sel.start < textLen) {
+      _rope.delete(sel.start, sel.start + 1);
+      _currentVersion++;
+      dirtyLine = _rope.getLineAtOffset(sel.start);
+    } else {
+      return;
+    }
+    
+    _syncToConnection();
+    notifyListeners();
   }
 
   @override
