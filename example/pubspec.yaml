@@ -13,7 +13,7 @@ dependencies:
   code_forge: { path: ../ }
   cupertino_icons: ^1.0.8
   re_highlight: ^0.0.3
-  web_socket_channel: ^3.0.3
+  google_fonts: ^6.3.3
 
 dev_dependencies:
   flutter_test:

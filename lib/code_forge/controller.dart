@@ -1,28 +1,23 @@
 import 'dart:async';
+import 'package:code_forge/code_forge.dart';
 import 'package:flutter/services.dart';
 import 'rope.dart';
 
 class CodeForgeController implements DeltaTextInputClient {
+  static const _flushDelay = Duration(milliseconds: 300);
+  final List<VoidCallback> _listeners = [];
+  VoidCallback? manualAiCompletion;
   Rope _rope = Rope('');
   TextSelection _selection = const TextSelection.collapsed(offset: 0);
   TextInputConnection? connection;
-
-  final List<VoidCallback> _listeners = [];
-  TextRange? dirtyRegion;
-  int? dirtyLine;
-  bool selectionOnly = false;
-  String? _cachedText;
-  int _cachedTextVersion = -1;
-  int _currentVersion = 0;
-
-  int? _bufferLineIndex;
-  String? _bufferLineText;
-  int _bufferLineRopeStart = 0;
-  int _bufferLineOriginalLength = 0;
   Timer? _flushTimer;
-  static const _flushDelay = Duration(milliseconds: 300);
-  bool _bufferDirty = false;
-  bool bufferNeedsRepaint = false;
+  TextRange? dirtyRegion;
+  List<FoldRange> foldings = [];
+  String? _cachedText, _bufferLineText;
+  bool _bufferDirty = false, bufferNeedsRepaint = false, selectionOnly = false;
+  int _bufferLineRopeStart = 0, _bufferLineOriginalLength = 0;
+  int _cachedTextVersion = -1, _currentVersion = 0;
+  int? dirtyLine, _bufferLineIndex;
 
   String? _lastSentText;
   TextSelection? _lastSentSelection;
@@ -30,7 +25,6 @@ class CodeForgeController implements DeltaTextInputClient {
   String get text {
     if (_cachedText == null || _cachedTextVersion != _currentVersion) {
       if (_bufferLineIndex != null && _bufferDirty) {
-        // Include buffered text that hasn't been flushed to rope yet
         final ropeText = _rope.getText();
         final before = ropeText.substring(0, _bufferLineRopeStart);
         final after = ropeText.substring(
@@ -58,6 +52,22 @@ class CodeForgeController implements DeltaTextInputClient {
 
   int get lineCount {
     return _rope.lineCount;
+  }
+
+  String get visibleText {
+    if (foldings.isEmpty) return text;
+    final visLines = List<String>.from(lines);
+    for (final fold in foldings.reversed) {
+      if (!fold.isFolded) continue;
+      final start = fold.startIndex + 1;
+      final end = fold.endIndex + 1;
+      final safeStart = start.clamp(0, visLines.length);
+      final safeEnd = end.clamp(safeStart, visLines.length);
+      if (safeEnd > safeStart) {
+        visLines.removeRange(safeStart, safeEnd);
+      }
+    }
+    return visLines.join('\n');
   }
 
   String getLineText(int lineIndex) {
@@ -413,9 +423,50 @@ class CodeForgeController implements DeltaTextInputClient {
     notifyListeners();
   }
 
+  String _getCurrentWordPrefix(String text, int offset) {
+    final safeOffset = offset.clamp(0, text.length);
+    final beforeCursor = text.substring(0, safeOffset);
+    final match = RegExp(r'([a-zA-Z_][a-zA-Z0-9_]*)$').firstMatch(beforeCursor);
+    return match?.group(0) ?? '';
+  }
+
   void clearDirtyRegion() {
     dirtyRegion = null;
     dirtyLine = null;
+  }
+
+  /// Insert text at the current cursor position (or replace selection).
+  void insertAtCurrentCursor(
+    String textToInsert, {
+    bool replaceTypedChar = false,
+  }) {
+    _flushBuffer();
+
+    final cursorPosition = selection.extentOffset;
+    final safePosition = cursorPosition.clamp(0, _rope.length);
+    final currentLine = _rope.getLineAtOffset(safePosition);
+    final isFolded = foldings.any(
+      (fold) =>
+        fold.isFolded &&
+        currentLine > fold.startIndex &&
+        currentLine <= fold.endIndex,
+    );
+
+    if (isFolded) {
+      final newPosition = visibleText.length;
+      selection = TextSelection.collapsed(offset: newPosition);
+      return;
+    }
+
+    if (replaceTypedChar) {
+      final ropeText = _rope.getText();
+      final prefix = _getCurrentWordPrefix(ropeText, safePosition);
+      final prefixStart = (safePosition - prefix.length).clamp(0, _rope.length);
+
+      replaceRange(prefixStart, safePosition, textToInsert);
+    } else {
+      replaceRange(safePosition, safePosition, textToInsert);
+    }
   }
 
   /// Sync current state to the IME connection
@@ -524,7 +575,10 @@ class CodeForgeController implements DeltaTextInputClient {
     final safeEnd = end.clamp(safeStart, _rope.length);
 
     if (safeStart < safeEnd) {
-      _rope.delete(safeStart, safeEnd - safeStart);
+      _rope.delete(
+        safeStart,
+        safeEnd,
+      ); // Fixed: Rope.delete takes (start, end), not (start, length)
     }
     if (replacement.isNotEmpty) {
       _rope.insert(safeStart, replacement);
@@ -548,12 +602,6 @@ class CodeForgeController implements DeltaTextInputClient {
     }
 
     notifyListeners();
-  }
-
-  /// Insert text at the current cursor position (or replace selection).
-  void insertAtCursor(String textToInsert) {
-    final sel = selection;
-    replaceRange(sel.start, sel.end, textToInsert);
   }
 
   void dispose() {

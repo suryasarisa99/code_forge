@@ -557,10 +557,10 @@ const Map<String, List<String>> semanticToHljs = {
   'type': ['built_in', 'type'],
   'namespace': ['built_in', 'type'],
   'interface': ['built_in', 'type'],
-  'struct': ['built_in', 'type'],
+  'struct': ['attr', 'attribute'],
   'enum': ['built_in', 'type'],
-  'function': ['section', 'bullet'],
-  'method': ['section', 'bullet'],
+  'function': ['section' ,'bullet', 'selector-tag', 'selector-id'],
+  'method': ['section', 'bullet', 'selector-tag', 'selector-id'],
   'decorator': ['meta', 'meta-keyword'],
   'variable': ['attr', 'attribute'],
   'parameter': ['attr', 'attribute'],
@@ -582,9 +582,7 @@ const Map<String, List<String>> semanticToHljs = {
 /// Pyright uses some token types differently than the LSP standard.
 const Map<String, List<String>> pyrightSemanticOverrides = {
   // Pyright uses 'enumMember' for function/method names
-  'enumMember': ['section', 'bullet'],
-  // Pyright uses 'method' for 'self' parameter
-  'method': ['attr', 'attribute'],
+  'enumMember': ['section', 'bullet', 'selector-tag', 'selector-id'],
 };
 
 /// Get the semantic token mapping for a specific language server.

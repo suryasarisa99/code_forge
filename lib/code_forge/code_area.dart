@@ -17,6 +17,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
+//TODO: enhance ai suggestion
+//TODO: implement LSP hover
+
 class CodeForge extends StatefulWidget {
   final CodeForgeController? controller;
   final Map<String, TextStyle>? editorTheme;
@@ -79,6 +82,7 @@ class CodeForge extends StatefulWidget {
 
 class _CodeForgeState extends State<CodeForge>
     with SingleTickerProviderStateMixin {
+  static const _semanticTokenDebounce = Duration(milliseconds: 500);
   late final ScrollController _hscrollController, _vscrollController;
   late final CodeForgeController _controller;
   late final FocusNode _focusNode;
@@ -89,21 +93,25 @@ class _CodeForgeState extends State<CodeForge>
   late final GutterStyle _gutterStyle;
   late final SuggestionStyle _suggestionStyle;
   late final HoverDetailsStyle _hoverDetailsStyle;
-  TextInputConnection? _connection;
-  bool _lspReady = false, _isHovering = false;
-  String _previousValue = "";
-  List<LspSemanticToken>? _semanticTokens;
-  DateTime? _lastSemanticTokenFetch;
-  static const _semanticTokenDebounce = Duration(milliseconds: 500);
-  final _isMobile = Platform.isAndroid || Platform.isIOS;
   late final ValueNotifier<List<dynamic>?> _suggestionNotifier, _hoverNotifier;
   late final ValueNotifier<List<LspErrors>> _diagnosticsNotifier;
   late final ValueNotifier<String?> _aiNotifier;
   late final ValueNotifier<Offset?> _aiOffsetNotifier;
   late final ValueNotifier<Offset> _contextMenuOffsetNotifier;
   late final ValueNotifier<bool> _selectionActiveNotifier, _isHoveringPopup;
-  int _suggestionSelectedIndex = 0;
-  Timer? _hoverTimer, _suggestionDebounceTimer;
+  final ValueNotifier<Offset> _offsetNotifier = ValueNotifier(Offset(0, 0));
+  final Map<String, String> _cachedResponse = {};
+  final _isMobile = Platform.isAndroid || Platform.isIOS;
+  final _suggScrollController = ScrollController();
+  TextInputConnection? _connection;
+  bool _lspReady = false, _isHovering = false, _isTyping = false;
+  String _previousValue = "";
+  List<LspSemanticToken>? _semanticTokens;
+  DateTime? _lastSemanticTokenFetch;
+  int _sugSelIndex = 0;
+  Timer? _hoverTimer, _aiDebounceTimer;
+  List<dynamic> _suggestions = [];
+  TextSelection _prevSelection = TextSelection.collapsed(offset: 0);
 
   @override
   void initState() {
@@ -116,7 +124,6 @@ class _CodeForgeState extends State<CodeForge>
     _vscrollController = widget.verticalScrollController ?? ScrollController();
     _editorTheme = widget.editorTheme ?? vs2015Theme;
     _language = widget.language ?? langPython;
-
     _suggestionNotifier = ValueNotifier<List<dynamic>?>(null);
     _hoverNotifier = ValueNotifier<List<dynamic>?>(null);
     _diagnosticsNotifier = ValueNotifier<List<LspErrors>>([]);
@@ -125,8 +132,9 @@ class _CodeForgeState extends State<CodeForge>
     _contextMenuOffsetNotifier = ValueNotifier<Offset>(const Offset(-1, -1));
     _selectionActiveNotifier = ValueNotifier<bool>(false);
     _isHoveringPopup = ValueNotifier<bool>(false);
-
+    _controller.manualAiCompletion = getManualAiSuggestion;
     _selectionStyle = widget.selectionStyle ?? CodeSelectionStyle();
+
     _gutterStyle =
         widget.gutterStyle ??
         GutterStyle(
@@ -135,12 +143,13 @@ class _CodeForgeState extends State<CodeForge>
           unfoldedIconColor: _editorTheme['root']?.color,
           backgroundColor: _editorTheme['root']?.backgroundColor,
         );
+
     _suggestionStyle =
         widget.suggestionStyle ??
         SuggestionStyle(
           elevation: 6,
           textStyle: (() {
-            TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+            TextStyle style = widget.textStyle ?? TextStyle();
             if (style.color == null) {
               style = style.copyWith(color: _editorTheme['root']!.color);
             }
@@ -282,15 +291,147 @@ class _CodeForgeState extends State<CodeForge>
     })();
 
     _controller.addListener(() {
+      final text = _controller.text;
+      final lines = _controller.lines;
+      final line = _controller.lineCount - 1;
+      final character = lines.isNotEmpty ? lines.last.length : 0;
+      final currentSelection = _controller.selection;
+      final cursorPosition = currentSelection.extentOffset;
+      final prefix = _getCurrentWordPrefix(text, cursorPosition);
+
+      _isTyping = false;
+
       _resetCursorBlink();
 
-      final text = _controller.text;
+      final oldText = _previousValue;
+      final oldSelection = _prevSelection;
 
       if (widget.lspConfig != null && _lspReady && text != _previousValue) {
         _previousValue = text;
         (() async => await widget.lspConfig!.updateDocument(text))();
         _scheduleSemantictokenRefresh();
       }
+
+      _aiDebounceTimer?.cancel();
+
+      if(_suggestionNotifier.value != null && _aiNotifier.value != null){
+        _aiNotifier.value = null;
+      }
+
+      if(
+        widget.aiCompletion != null &&
+        _controller.selection.isValid &&
+        widget.aiCompletion!.enableCompletion
+      ){
+        if(_suggestionNotifier.value != null) return;
+        final text = _controller.text;
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, _controller.length);
+        final textAfterCursor = text.substring(cursorPosition);
+        if(cursorPosition <= 0) return;
+        bool lineEnd = textAfterCursor.isEmpty ||
+              textAfterCursor.startsWith('\n') ||
+              textAfterCursor.trim().isEmpty;
+        if(!lineEnd) return;
+        final codeToSend = "${text.substring(0, cursorPosition)}<|CURSOR|>${text.substring(cursorPosition)}";
+        if(
+          widget.aiCompletion!.completionType == CompletionType.auto ||
+          widget.aiCompletion!.completionType == CompletionType.mixed
+        ){
+          _aiDebounceTimer = Timer(
+            Duration(milliseconds: widget.aiCompletion!.debounceTime),
+            () async{
+              _aiNotifier.value = await _getCachedResponse(codeToSend);
+            }
+          );
+        }
+      }
+
+      if (text.length == oldText.length + 1 &&
+          currentSelection.baseOffset == oldSelection.baseOffset + 1) {
+        final insertedChar = text.substring(
+          _prevSelection.baseOffset,
+          currentSelection.baseOffset,
+        );
+        _isTyping =
+            insertedChar.isNotEmpty &&
+            RegExp(r'[a-zA-Z]').hasMatch(insertedChar);
+        if (widget.enableSuggestions &&
+            _isTyping &&
+            prefix.isNotEmpty &&
+            _controller.selection.extentOffset > 0) {
+          if (widget.lspConfig == null) {
+            final regExp = RegExp(r'\b\w+\b');
+            final List<String> words = regExp
+                .allMatches(text)
+                .map((m) => m.group(0)!)
+                .toList();
+            String currentWord = '';
+            if (text.isNotEmpty) {
+              final match = RegExp(r'\w+$').firstMatch(text);
+              if (match != null) {
+                currentWord = match.group(0)!;
+              }
+            }
+            _suggestions.clear();
+            for (final i in words) {
+              if (!_suggestions.contains(i) && i != currentWord) {
+                _suggestions.add(i);
+              }
+            }
+            if (prefix.isNotEmpty) {
+              _suggestions = _suggestions
+                  .where((s) => s.startsWith(prefix))
+                  .toList();
+            }
+          } else if (_lspReady) {
+            final lspConfig = widget.lspConfig!;
+            (() async {
+              final suggestion = await lspConfig.getCompletions(
+                line,
+                character,
+              );
+              _suggestions = suggestion;
+            })();
+          }
+          _sortSuggestions(prefix);
+          final triggerChar = text[cursorPosition - 1];
+          if (!RegExp(r'[a-zA-Z]').hasMatch(triggerChar)) {
+            _suggestionNotifier.value = null;
+            return;
+          }
+          if (mounted && _suggestions.isNotEmpty) {
+            _sugSelIndex = 0;
+            _suggestionNotifier.value = _suggestions;
+          }
+        } else {
+          _suggestionNotifier.value = null;
+        }
+      }
+
+      _previousValue = text;
+      _prevSelection = currentSelection;
+    });
+  }
+
+  String _getCurrentWordPrefix(String text, int offset) {
+    final safeOffset = offset.clamp(0, text.length);
+    final beforeCursor = text.substring(0, safeOffset);
+    final match = RegExp(r'([a-zA-Z_][a-zA-Z0-9_]*)$').firstMatch(beforeCursor);
+    return match?.group(0) ?? '';
+  }
+
+  void _sortSuggestions(String prefix) {
+    _suggestions.sort((a, b) {
+      final aStartsWith = a is LspCompletion
+        ? a.label.toLowerCase().startsWith(prefix.toLowerCase())
+        : a.toLowerCase().startsWith(prefix.toLowerCase());
+      final bStartsWith = b is LspCompletion
+        ? b.label.toLowerCase().startsWith(prefix.toLowerCase())
+        : b.toLowerCase().startsWith(prefix.toLowerCase());
+      if (aStartsWith && !bStartsWith) return -1;
+      if (!aStartsWith && bStartsWith) return 1;
+
+      return a is LspCompletion ? b.label.compareTo(a.label) : b.compareTo(a);
     });
   }
 
@@ -341,7 +482,7 @@ class _CodeForgeState extends State<CodeForge>
     _selectionActiveNotifier.dispose();
     _isHoveringPopup.dispose();
     _hoverTimer?.cancel();
-    _suggestionDebounceTimer?.cancel();
+    _aiDebounceTimer?.cancel();
     super.dispose();
   }
 
@@ -664,8 +805,17 @@ class _CodeForgeState extends State<CodeForge>
     );
   }
 
+  void _commonKeyFunctions(){
+    if(_aiNotifier.value != null){
+      _aiNotifier.value = null;
+    }
+
+    _resetCursorBlink();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
     return LayoutBuilder(
       builder: (_, constraints) {
         return Stack(
@@ -706,35 +856,19 @@ class _CodeForgeState extends State<CodeForge>
                             return Focus(
                               focusNode: _focusNode,
                               onKeyEvent: (node, event) {
-                                if (event is KeyDownEvent ||
-                                    event is KeyRepeatEvent) {
-                                  final isShiftPressed =
-                                      HardwareKeyboard.instance.isShiftPressed;
-                                  final isCtrlPressed =
-                                      HardwareKeyboard
-                                          .instance
-                                          .isControlPressed ||
-                                      HardwareKeyboard.instance.isMetaPressed;
-
-                                  if (_suggestionNotifier.value != null &&
-                                      _suggestionNotifier.value!.isNotEmpty) {
+                                if (event is KeyDownEvent || event is KeyRepeatEvent) {
+                                  final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
+                                  final isCtrlPressed = HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed;
+                                  if (_suggestionNotifier.value != null && _suggestionNotifier.value!.isNotEmpty) {
                                     switch (event.logicalKey) {
                                       case LogicalKeyboardKey.arrowDown:
                                         setState(() {
-                                          _suggestionSelectedIndex =
-                                              (_suggestionSelectedIndex + 1) %
-                                              _suggestionNotifier.value!.length;
+                                          _sugSelIndex = (_sugSelIndex + 1) % _suggestionNotifier.value!.length;
                                         });
                                         return KeyEventResult.handled;
                                       case LogicalKeyboardKey.arrowUp:
                                         setState(() {
-                                          _suggestionSelectedIndex =
-                                              (_suggestionSelectedIndex -
-                                                  1 +
-                                                  _suggestionNotifier
-                                                      .value!
-                                                      .length) %
-                                              _suggestionNotifier.value!.length;
+                                          _sugSelIndex = (_sugSelIndex - 1 + _suggestionNotifier .value! .length) % _suggestionNotifier.value!.length;
                                         });
                                         return KeyEventResult.handled;
                                       case LogicalKeyboardKey.enter:
@@ -747,13 +881,6 @@ class _CodeForgeState extends State<CodeForge>
                                       default:
                                         break;
                                     }
-                                  }
-
-                                  if (_aiNotifier.value != null &&
-                                      event.logicalKey ==
-                                          LogicalKeyboardKey.tab) {
-                                    _acceptAiCompletion();
-                                    return KeyEventResult.handled;
                                   }
 
                                   if (isCtrlPressed) {
@@ -778,40 +905,69 @@ class _CodeForgeState extends State<CodeForge>
                                   switch (event.logicalKey) {
                                     case LogicalKeyboardKey.backspace:
                                       _controller.backspace();
-                                      _resetCursorBlink();
+                                      if(_suggestionNotifier.value != null){
+                                        _suggestionNotifier.value = null;
+                                      }
+                                      _commonKeyFunctions();
                                       return KeyEventResult.handled;
+
                                     case LogicalKeyboardKey.delete:
                                       _controller.delete();
-                                      _resetCursorBlink();
+                                      if(_suggestionNotifier.value != null){
+                                        _suggestionNotifier.value = null;
+                                      }
+                                      _commonKeyFunctions();
                                       return KeyEventResult.handled;
+
                                     case LogicalKeyboardKey.arrowDown:
                                       _handleArrowDown(isShiftPressed);
-                                      _resetCursorBlink();
+                                      _commonKeyFunctions();
                                       return KeyEventResult.handled;
+
                                     case LogicalKeyboardKey.arrowUp:
                                       _handleArrowUp(isShiftPressed);
-                                      _resetCursorBlink();
+                                      _commonKeyFunctions();
                                       return KeyEventResult.handled;
+
                                     case LogicalKeyboardKey.arrowRight:
                                       _handleArrowRight(isShiftPressed);
-                                      _resetCursorBlink();
+                                      _commonKeyFunctions();
                                       return KeyEventResult.handled;
+
                                     case LogicalKeyboardKey.arrowLeft:
                                       _handleArrowLeft(isShiftPressed);
-                                      _resetCursorBlink();
+                                      _commonKeyFunctions();
                                       return KeyEventResult.handled;
+
                                     case LogicalKeyboardKey.home:
+                                      if(_suggestionNotifier.value != null){
+                                          _suggestionNotifier.value = null;
+                                      }
                                       _handleHome(isShiftPressed);
-                                      _resetCursorBlink();
+                                      _commonKeyFunctions();
                                       return KeyEventResult.handled;
+
                                     case LogicalKeyboardKey.end:
+                                      if(_suggestionNotifier.value != null){
+                                        _suggestionNotifier.value = null;
+                                      }
                                       _handleEnd(isShiftPressed);
-                                      _resetCursorBlink();
+                                      _commonKeyFunctions();
                                       return KeyEventResult.handled;
+
                                     case LogicalKeyboardKey.escape:
                                       _contextMenuOffsetNotifier.value =
                                           const Offset(-1, -1);
                                       _aiNotifier.value = null;
+                                      _suggestionNotifier.value = null;
+                                      return KeyEventResult.handled;
+
+                                    case LogicalKeyboardKey.tab:
+                                      if(_aiNotifier.value != null){
+                                        _acceptAiCompletion();
+                                      } else if(_suggestionNotifier.value == null) {
+                                        _controller.insertAtCurrentCursor('\t');
+                                      }
                                       return KeyEventResult.handled;
                                     default:
                                   }
@@ -847,6 +1003,8 @@ class _CodeForgeState extends State<CodeForge>
                                     _contextMenuOffsetNotifier,
                                 hoverNotifier: _hoverNotifier,
                                 lineWrap: widget.lineWrap,
+                                offsetNotifier: _offsetNotifier,
+                                aiNotifier: _aiNotifier,
                               ),
                             );
                           },
@@ -858,7 +1016,85 @@ class _CodeForgeState extends State<CodeForge>
               ),
             ),
             _buildContextMenu(),
-            _buildSuggestionPopup(),
+            ValueListenableBuilder(
+              valueListenable: _suggestionNotifier,
+              builder: (_, sugg, child) {
+                if (sugg == null) {
+                  _sugSelIndex = 0;
+                  return SizedBox.shrink();
+                }
+                return Positioned(
+                  width: screenWidth < 700
+                      ? screenWidth * 0.63
+                      : screenWidth * 0.3,
+                  top:
+                      _offsetNotifier.value.dy +
+                      (widget.textStyle?.fontSize ?? 14) +
+                      10,
+                  left: _offsetNotifier.value.dx,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: 400,
+                      maxWidth: 400,
+                      minWidth: 70,
+                    ),
+                    child: Card(
+                      shape: _suggestionStyle.shape,
+                      elevation: _suggestionStyle.elevation,
+                      color: _suggestionStyle.backgroundColor,
+                      margin: EdgeInsets.zero,
+                      child: RawScrollbar(
+                        thumbVisibility: true,
+                        thumbColor: _editorTheme['root']!.color!.withAlpha(80),
+                        controller: _suggScrollController,
+                        child: ListView.builder(
+                          itemExtent: (widget.textStyle?.fontSize ?? 14) + 6.5,
+                          controller: _suggScrollController,
+                          padding: EdgeInsets.all(6),
+                          shrinkWrap: true,
+                          itemCount: sugg.length,
+                          itemBuilder: (_, indx) {
+                            final item = sugg[indx];
+                            return Container(
+                              color: _sugSelIndex == indx
+                                ? Color(0xff024281)
+                                : Colors.transparent,
+                              child: InkWell(
+                                canRequestFocus: false,
+                                hoverColor: _suggestionStyle.hoverColor,
+                                focusColor: _suggestionStyle.focusColor,
+                                splashColor: _suggestionStyle.splashColor,
+                                onTap: () => setState(() {
+                                  _sugSelIndex = indx;
+                                  _suggestionNotifier.value = null;
+                                }),
+                                child: Row(
+                                  children: [
+                                    if (item is LspCompletion) ...[
+                                      item.icon,
+                                      const SizedBox(width: 10),
+                                      Text(
+                                        item.label,
+                                        style: _suggestionStyle.textStyle,
+                                      ),
+                                    ],
+                                    if (item is String)
+                                      Text(
+                                        item,
+                                        style: _suggestionStyle.textStyle,
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
             _buildHoverPopup(),
           ],
         );
@@ -870,109 +1106,53 @@ class _CodeForgeState extends State<CodeForge>
     final suggestions = _suggestionNotifier.value;
     if (suggestions == null || suggestions.isEmpty) return;
 
-    final selected = suggestions[_suggestionSelectedIndex];
+    final selected = suggestions[_sugSelIndex];
     String insertText = '';
 
-    if (selected is Map) {
+    if (selected is LspCompletion) {
+      insertText = selected.label;
+    } else if (selected is Map) {
       insertText = selected['insertText'] ?? selected['label'] ?? '';
     } else if (selected is String) {
       insertText = selected;
     }
 
     if (insertText.isNotEmpty) {
-      final sel = _controller.selection;
-      final text = _controller.text;
-      int start = sel.extentOffset;
-      while (start > 0 && RegExp(r'[\w_]').hasMatch(text[start - 1])) {
-        start--;
-      }
-      _controller.replaceRange(start, sel.extentOffset, insertText);
+      _controller.insertAtCurrentCursor(insertText, replaceTypedChar: true);
     }
 
     _suggestionNotifier.value = null;
-    _suggestionSelectedIndex = 0;
+    _sugSelIndex = 0;
   }
 
+  Future<void> getManualAiSuggestion() async {
+    _suggestionNotifier.value = null;
+    if (widget.aiCompletion?.completionType == CompletionType.manual ||
+        widget.aiCompletion?.completionType == CompletionType.mixed) {
+      final String text = _controller.text;
+      final int cursorPosition = _controller.selection.extentOffset;
+      final String codeToSend = "${text.substring(0, cursorPosition)}<|CURSOR|>${text.substring(cursorPosition)}";
+      _aiNotifier.value = await _getCachedResponse(codeToSend);
+    }
+  }
+
+  Future<String> _getCachedResponse(String codeToSend) async {
+    final String key = codeToSend.hashCode.toString();
+    if (_cachedResponse.containsKey(key)) {
+      return _cachedResponse[key]!;
+    }
+    final String aiResponse = await widget.aiCompletion!.model.completionResponse(codeToSend);
+    _cachedResponse[key] = aiResponse;
+    return aiResponse;
+  }
+
+  //FIXME
   void _acceptAiCompletion() {
     final aiText = _aiNotifier.value;
     if (aiText == null || aiText.isEmpty) return;
-
-    _controller.insertAtCursor(aiText);
+    _controller.insertAtCurrentCursor(aiText);
     _aiNotifier.value = null;
     _aiOffsetNotifier.value = null;
-  }
-
-  Widget _buildSuggestionPopup() {
-    return ValueListenableBuilder<List<dynamic>?>(
-      valueListenable: _suggestionNotifier,
-      builder: (context, suggestions, _) {
-        if (suggestions == null || suggestions.isEmpty) {
-          return const SizedBox.shrink();
-        }
-
-        final caretOffset = _aiOffsetNotifier.value ?? const Offset(100, 100);
-
-        return Positioned(
-          left: caretOffset.dx,
-          top: caretOffset.dy + 20,
-          child: Material(
-            elevation: _suggestionStyle.elevation,
-            color: _suggestionStyle.backgroundColor,
-            shape: _suggestionStyle.shape,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 200, maxWidth: 350),
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: suggestions.length,
-                itemBuilder: (context, index) {
-                  final item = suggestions[index];
-                  final label = item is Map
-                      ? (item['label'] ?? '')
-                      : item.toString();
-                  final detail = item is Map ? (item['detail'] ?? '') : '';
-                  final isSelected = index == _suggestionSelectedIndex;
-
-                  return InkWell(
-                    onTap: () {
-                      _suggestionSelectedIndex = index;
-                      _acceptSuggestion();
-                    },
-                    hoverColor: _suggestionStyle.hoverColor,
-                    child: Container(
-                      color: isSelected ? _suggestionStyle.focusColor : null,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              label,
-                              style: _suggestionStyle.textStyle,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          if (detail.isNotEmpty)
-                            Text(
-                              detail,
-                              style: _suggestionStyle.textStyle.copyWith(
-                                color: _suggestionStyle.textStyle.color!
-                                    .withAlpha(150),
-                                fontSize: 11,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-        );
-      },
-    );
   }
 
   Widget _buildHoverPopup() {
@@ -1079,8 +1259,9 @@ class _CodeField extends LeafRenderObjectWidget {
   final List<LspErrors> diagnostics;
   final String? aiText;
   final ValueNotifier<bool> selectionActiveNotifier;
-  final ValueNotifier<Offset> contextMenuOffsetNotifier;
+  final ValueNotifier<Offset> contextMenuOffsetNotifier, offsetNotifier;
   final ValueNotifier<List<dynamic>?> hoverNotifier;
+  final ValueNotifier<String?> aiNotifier;
   final BuildContext context;
 
   const _CodeField({
@@ -1102,7 +1283,9 @@ class _CodeField extends LeafRenderObjectWidget {
     required this.isMobile,
     required this.selectionActiveNotifier,
     required this.contextMenuOffsetNotifier,
+    required this.offsetNotifier,
     required this.hoverNotifier,
+    required this.aiNotifier,
     required this.context,
     required this.lineWrap,
     this.aiText,
@@ -1134,12 +1317,13 @@ class _CodeField extends LeafRenderObjectWidget {
       gutterStyle: gutterStyle,
       selectionStyle: selectionStyle,
       diagnostics: diagnostics,
-      aiText: aiText,
       isMobile: isMobile,
       selectionActiveNotifier: selectionActiveNotifier,
       contextMenuOffsetNotifier: contextMenuOffsetNotifier,
       hoverNotifier: hoverNotifier,
       lineWrap: lineWrap,
+      offsetNotifier: offsetNotifier,
+      aiNotifier: aiNotifier
     );
   }
 
@@ -1152,8 +1336,7 @@ class _CodeField extends LeafRenderObjectWidget {
       renderObject.updateSemanticTokens(semanticTokens!);
     }
     renderObject
-      ..updateDiagnostics(diagnostics)
-      ..updateAiText(aiText);
+      .updateDiagnostics(diagnostics);
   }
 }
 
@@ -1174,12 +1357,14 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
   final CodeSelectionStyle selectionStyle;
   final bool isMobile, lineWrap;
   final ValueNotifier<bool> selectionActiveNotifier;
-  final ValueNotifier<Offset> contextMenuOffsetNotifier;
+  final ValueNotifier<Offset> contextMenuOffsetNotifier, offsetNotifier;
   final ValueNotifier<List<dynamic>?> hoverNotifier;
+  final ValueNotifier<String?> aiNotifier;
   final BuildContext context;
   final Map<int, double> _lineWidthCache = {};
   final Map<int, String> _lineTextCache = {};
   final Map<int, ui.Paragraph> _paragraphCache = {};
+  final Map<int, double> _lineHeightCache = {};
   final List<FoldRange> _foldRanges = [];
   late final double _lineHeight;
   late final double _gutterPadding;
@@ -1190,23 +1375,18 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
   late final SyntaxHighlighter _syntaxHighlighter;
   late double _gutterWidth;
   List<LspErrors> _diagnostics;
-  String? _aiText;
-  bool _foldRangesNeedsClear = false;
   int _cachedLineCount = 0;
   int _cachedCaretOffset = -1, _cachedCaretLine = 0, _cachedCaretLineStart = 0;
   int? _dragStartOffset;
   Timer? _selectionTimer, _hoverTimer;
-  bool _selectionActive = false, _isDragging = false;
   Offset? _pointerDownPosition;
   Offset _currentPosition = Offset.zero;
-  bool _draggingStartHandle = false,
-      _draggingEndHandle = false,
-      _draggingCHandle = false;
-  bool _showBubble = false;
+  bool _foldRangesNeedsClear = false;
+  bool _selectionActive = false, _isDragging = false;
+  bool _draggingStartHandle = false, _draggingEndHandle = false;
+  bool _showBubble = false, _draggingCHandle = false;
   Rect? _startHandleRect, _endHandleRect, _normalHandle;
-  double _longLineWidth = 0.0;
-  double _wrapWidth = double.infinity;
-  final Map<int, double> _lineHeightCache = {};
+  double _longLineWidth = 0.0, _wrapWidth = double.infinity;
 
   void updateSemanticTokens(List<LspSemanticToken> tokens) {
     _syntaxHighlighter.updateSemanticTokens(tokens, controller.text);
@@ -1217,13 +1397,6 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
   void updateDiagnostics(List<LspErrors> diagnostics) {
     if (_diagnostics != diagnostics) {
       _diagnostics = diagnostics;
-      markNeedsPaint();
-    }
-  }
-
-  void updateAiText(String? aiText) {
-    if (_aiText != aiText) {
-      _aiText = aiText;
       markNeedsPaint();
     }
   }
@@ -1270,18 +1443,19 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
     required this.gutterStyle,
     required this.selectionStyle,
     required List<LspErrors> diagnostics,
-    String? aiText,
     required this.isMobile,
     required this.selectionActiveNotifier,
     required this.contextMenuOffsetNotifier,
+    required this.offsetNotifier,
     required this.hoverNotifier,
+    required this.aiNotifier,
     required this.context,
     required this.lineWrap,
     this.languageId,
     this.innerPadding,
     this.textStyle,
-  }) : _diagnostics = diagnostics,
-       _aiText = aiText {
+  }) : _diagnostics = diagnostics
+  {
     final fontSize = textStyle?.fontSize ?? 14.0;
     final fontFamily = textStyle?.fontFamily;
     final color =
@@ -1351,6 +1525,8 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
     final hScrollOffset = hscrollController.offset;
     final viewportHeight = vscrollController.position.viewportDimension;
     final viewportWidth = hscrollController.position.viewportDimension;
+
+    offsetNotifier.value = Offset(caretX, caretY);
 
     if (caretY > 0 && caretY <= vScrollOffset + (innerPadding?.top ?? 0)) {
       vscrollController.animateTo(
@@ -1787,7 +1963,7 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
     }
 
     final localX = position.dx;
-    
+
     final hasActiveFolds = _foldRanges.any((f) => f.isFolded);
     final lineStartY = _getLineYOffset(tappedLineIndex, hasActiveFolds);
     final localY = position.dy - lineStartY;
@@ -1832,7 +2008,6 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
     double visibleHeight = 0;
     double maxLineWidth = 0;
 
-    
     if (lineWrap) {
       final viewportWidth = constraints.maxWidth.isFinite
           ? constraints.maxWidth
@@ -1841,7 +2016,6 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
           viewportWidth - _gutterWidth - (innerPadding?.horizontal ?? 0);
       final clampedWrapWidth = newWrapWidth < 100 ? 100.0 : newWrapWidth;
 
-      
       if ((_wrapWidth - clampedWrapWidth).abs() > 1) {
         _wrapWidth = clampedWrapWidth;
         _paragraphCache.clear();
@@ -1855,7 +2029,6 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
       if (hasActiveFolds && _isLineFolded(i)) continue;
 
       if (lineWrap) {
-        
         final lineHeight = _getWrappedLineHeight(i);
         visibleHeight += lineHeight;
       } else {
@@ -1939,7 +2112,6 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
     double firstVisibleLineY;
 
     if (!lineWrap && !hasActiveFolds) {
-      
       firstVisibleLine = (viewTop / _lineHeight).floor().clamp(
         0,
         lineCount - 1,
@@ -1950,7 +2122,6 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
       );
       firstVisibleLineY = firstVisibleLine * _lineHeight;
     } else {
-      
       double currentY = 0;
       firstVisibleLine = 0;
       lastVisibleLine = lineCount - 1;
@@ -2081,7 +2252,7 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
       hasActiveFolds,
     );
 
-    if (_aiText != null && _aiText!.isNotEmpty) {
+    if (aiNotifier.value != null) {
       _drawAiGhostText(
         canvas,
         offset,
@@ -2594,7 +2765,7 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
     final box = boxes.first;
 
     final lineY = _getLineYOffset(lineIndex, hasActiveFolds);
-    final boxY = lineY + box.top; 
+    final boxY = lineY + box.top;
 
     final screenX =
         offset.dx +
@@ -2718,7 +2889,7 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
               offset.dy +
               (innerPadding?.top ?? 0) +
               lineY +
-              box.top + 
+              box.top +
               _lineHeight -
               3 -
               vscrollController.offset;
@@ -2841,7 +3012,7 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
               offset.dy +
               (innerPadding?.top ?? 0) +
               lineY +
-              box.top - 
+              box.top -
               vscrollController.offset;
 
           canvas.drawRect(
@@ -3092,11 +3263,12 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
     double firstVisibleLineY,
     bool hasActiveFolds,
   ) {
-    if (_aiText == null || _aiText!.isEmpty) return;
+    if (aiNotifier.value == null) return;
     if (!controller.selection.isValid || !controller.selection.isCollapsed) {
       return;
     }
 
+    final aiText = aiNotifier.value!;
     final cursorOffset = controller.selection.extentOffset;
     final cursorLine = controller.getLineAtOffset(cursorOffset);
 
@@ -3145,7 +3317,7 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
       fontStyle: FontStyle.italic,
     );
 
-    final aiLines = _aiText!.split('\n');
+    final aiLines = aiText.split('\n');
 
     for (int i = 0; i < aiLines.length; i++) {
       final aiLineText = aiLines[i];
