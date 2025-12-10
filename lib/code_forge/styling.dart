@@ -49,6 +49,27 @@ class GutterStyle {
   ///
   /// Defaults to [Icons.keyboard_arrow_down_outlined] for unfolded lines.
   final IconData foldedIcon;
+
+  /// The color used to highlight the current line number in the gutter.
+  /// If null, the line number will use the default text color.
+  final Color? activeLineNumberColor;
+
+  /// The color used for non-active line numbers in the gutter.
+  /// If null, defaults to a dimmed version of the text color.
+  final Color? inactiveLineNumberColor;
+
+  /// The color used to highlight line numbers with errors (severity 1).
+  /// Defaults to red.
+  final Color errorLineNumberColor;
+
+  /// The color used to highlight line numbers with warnings (severity 2).
+  /// Defaults to yellow/orange.
+  final Color warningLineNumberColor;
+
+  /// The background color used to highlight folded line start.
+  /// If null, a low opacity version of the selection color is used.
+  final Color? foldedLineHighlightColor;
+
   GutterStyle({
     this.lineNumberStyle,
     this.backgroundColor,
@@ -58,6 +79,11 @@ class GutterStyle {
     this.foldingIconSize,
     this.foldedIconColor,
     this.unfoldedIconColor,
+    this.activeLineNumberColor,
+    this.inactiveLineNumberColor,
+    this.errorLineNumberColor = const Color(0xFFE53935),
+    this.warningLineNumberColor = const Color(0xFFFFA726),
+    this.foldedLineHighlightColor,
   });
 }
 
@@ -124,13 +150,13 @@ class HoverDetailsStyle extends OverlayStyle {
 class SearchHighlight {
   /// The start offset of the highlighted text
   final int start;
-  
+
   /// The end offset of the highlighted text
   final int end;
-  
+
   /// The text style to apply to the highlighted text
   final TextStyle style;
-  
+
   const SearchHighlight({
     required this.start,
     required this.end,

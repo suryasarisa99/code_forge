@@ -29,6 +29,11 @@ class CodeForgeController implements DeltaTextInputClient {
   TextSelection? _lastSentSelection;
   UndoRedoController? _undoController;
 
+  // Fold operation callbacks - set by the render object
+  void Function(int lineNumber)? _toggleFoldCallback;
+  VoidCallback? _foldAllCallback;
+  VoidCallback? _unfoldAllCallback;
+
   /// Set the undo controller for this editor
   void setUndoController(UndoRedoController? controller) {
     _undoController = controller;
@@ -997,90 +1002,76 @@ class CodeForgeController implements DeltaTextInputClient {
   }
 
   void findWord(
-    String word,
-  { 
+    String word, {
     TextStyle? highlightStyle,
     bool matchCase = false,
     bool matchWholeWord = false,
-  }){
-    final style = highlightStyle ?? const TextStyle(
-      backgroundColor: Colors.amberAccent
-    );
-    
+  }) {
+    final style =
+        highlightStyle ?? const TextStyle(backgroundColor: Colors.amberAccent);
+
     searchHighlights.clear();
-    
+
     if (word.isEmpty) {
       searchHighlightsChanged = true;
       notifyListeners();
       return;
     }
-    
+
     final searchText = text;
     final searchWord = matchCase ? word : word.toLowerCase();
     final textToSearch = matchCase ? searchText : searchText.toLowerCase();
-    
+
     int offset = 0;
     while (offset < textToSearch.length) {
       final index = textToSearch.indexOf(searchWord, offset);
       if (index == -1) break;
-      
+
       bool isMatch = true;
-      
+
       if (matchWholeWord) {
         final before = index > 0 ? searchText[index - 1] : '';
-        final after = index + word.length < searchText.length 
-            ? searchText[index + word.length] 
+        final after = index + word.length < searchText.length
+            ? searchText[index + word.length]
             : '';
-        
+
         final isWordChar = RegExp(r'\w');
         final beforeIsWord = before.isNotEmpty && isWordChar.hasMatch(before);
         final afterIsWord = after.isNotEmpty && isWordChar.hasMatch(after);
-        
+
         if (beforeIsWord || afterIsWord) {
           isMatch = false;
         }
       }
-      
+
       if (isMatch) {
         searchHighlights.add(
-          SearchHighlight(
-            start: index,
-            end: index + word.length,
-            style: style,
-          ),
+          SearchHighlight(start: index, end: index + word.length, style: style),
         );
       }
-      
+
       offset = index + 1;
     }
-    
+
     searchHighlightsChanged = true;
     notifyListeners();
   }
 
-  void findRegex(
-    RegExp regex,
-    TextStyle? highlightStyle,
-  ){
-    final style = highlightStyle ?? const TextStyle(
-      backgroundColor: Colors.amberAccent
-    );
-    
+  void findRegex(RegExp regex, TextStyle? highlightStyle) {
+    final style =
+        highlightStyle ?? const TextStyle(backgroundColor: Colors.amberAccent);
+
     searchHighlights.clear();
-    
+
     final searchText = text;
     final matches = regex.allMatches(searchText);
-    
+
     for (final match in matches) {
       searchHighlights.add(
-        SearchHighlight(
-          start: match.start,
-          end: match.end,
-          style: style,
-        ),
+        SearchHighlight(start: match.start, end: match.end, style: style),
       );
     }
-    
+
     searchHighlightsChanged = true;
     notifyListeners();
   }
@@ -1092,14 +1083,41 @@ class CodeForgeController implements DeltaTextInputClient {
     notifyListeners();
   }
 
-  //TODO
-  void toggleFold(int lineNumber){
-    throw RangeError("No fold range is detected in the selected range");
+  /// Set fold operation callbacks - called by the render object
+  void setFoldCallbacks({
+    void Function(int lineNumber)? toggleFold,
+    VoidCallback? foldAll,
+    VoidCallback? unfoldAll,
+  }) {
+    _toggleFoldCallback = toggleFold;
+    _foldAllCallback = foldAll;
+    _unfoldAllCallback = unfoldAll;
   }
 
-  void foldAll(){}
+  /// Toggle fold at the specified line number (0-indexed)
+  /// Throws [StateError] if folding is not enabled or no fold range exists at the line
+  void toggleFold(int lineNumber) {
+    if (_toggleFoldCallback == null) {
+      throw StateError('Folding is not enabled or editor is not initialized');
+    }
+    _toggleFoldCallback!(lineNumber);
+  }
 
-  void unfoldAll(){}
+  /// Fold all foldable regions in the document
+  void foldAll() {
+    if (_foldAllCallback == null) {
+      throw StateError('Folding is not enabled or editor is not initialized');
+    }
+    _foldAllCallback!();
+  }
+
+  /// Unfold all folded regions in the document
+  void unfoldAll() {
+    if (_unfoldAllCallback == null) {
+      throw StateError('Folding is not enabled or editor is not initialized');
+    }
+    _unfoldAllCallback!();
+  }
 
   /// Dispose the controller
   void dispose() {

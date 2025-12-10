@@ -20,8 +20,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
-//TODO: Public API methods in controller.
-
 class CodeForge extends StatefulWidget {
   final CodeForgeController? controller;
   final UndoRedoController? undoController;
@@ -650,10 +648,19 @@ class _CodeForgeState extends State<CodeForge>
       return;
     }
 
+    int targetLine = currentLine - 1;
+    while (targetLine > 0 && _isLineInFoldedRegion(targetLine)) {
+      targetLine--;
+    }
+
+    if (_isLineInFoldedRegion(targetLine)) {
+      targetLine = _getFoldStartForLine(targetLine) ?? 0;
+    }
+
     final lineStart = _controller.getLineStartOffset(currentLine);
     final column = sel.extentOffset - lineStart;
-    final prevLineStart = _controller.getLineStartOffset(currentLine - 1);
-    final prevLineText = _controller.getLineText(currentLine - 1);
+    final prevLineStart = _controller.getLineStartOffset(targetLine);
+    final prevLineText = _controller.getLineText(targetLine);
     final prevLineLength = prevLineText.length;
     final newColumn = column.clamp(0, prevLineLength);
     final newOffset = (prevLineStart + newColumn).clamp(0, _controller.length);
@@ -688,10 +695,45 @@ class _CodeForgeState extends State<CodeForge>
       return;
     }
 
+    final foldAtCurrent = _getFoldRangeAtCurrentLine(currentLine);
+    int targetLine;
+    if (foldAtCurrent != null && foldAtCurrent.isFolded) {
+      targetLine = foldAtCurrent.endIndex + 1;
+    } else {
+      targetLine = currentLine + 1;
+    }
+
+    while (targetLine < lineCount && _isLineInFoldedRegion(targetLine)) {
+      final foldStart = _getFoldStartForLine(targetLine);
+      if (foldStart != null) {
+        final fold = _controller.foldings.firstWhere(
+          (f) => f.startIndex == foldStart && f.isFolded,
+          orElse: () => FoldRange(targetLine, targetLine),
+        );
+        targetLine = fold.endIndex + 1;
+      } else {
+        targetLine++;
+      }
+    }
+
+    if (targetLine >= lineCount) {
+      final endOffset = _controller.length;
+      if (withShift) {
+        _controller.setSelectionSilently(
+          TextSelection(baseOffset: sel.baseOffset, extentOffset: endOffset),
+        );
+      } else {
+        _controller.setSelectionSilently(
+          TextSelection.collapsed(offset: endOffset),
+        );
+      }
+      return;
+    }
+
     final lineStart = _controller.getLineStartOffset(currentLine);
     final column = sel.extentOffset - lineStart;
-    final nextLineStart = _controller.getLineStartOffset(currentLine + 1);
-    final nextLineText = _controller.getLineText(currentLine + 1);
+    final nextLineStart = _controller.getLineStartOffset(targetLine);
+    final nextLineText = _controller.getLineText(targetLine);
     final nextLineLength = nextLineText.length;
     final newColumn = column.clamp(0, nextLineLength);
     final newOffset = (nextLineStart + newColumn).clamp(0, _controller.length);
@@ -738,6 +780,34 @@ class _CodeForgeState extends State<CodeForge>
       _controller.setSelectionSilently(
         TextSelection.collapsed(offset: lineEnd),
       );
+    }
+  }
+
+  bool _isLineInFoldedRegion(int lineIndex) {
+    return _controller.foldings.any(
+      (fold) =>
+          fold.isFolded &&
+          lineIndex > fold.startIndex &&
+          lineIndex <= fold.endIndex,
+    );
+  }
+
+  int? _getFoldStartForLine(int lineIndex) {
+    for (final fold in _controller.foldings) {
+      if (fold.isFolded &&
+          lineIndex > fold.startIndex &&
+          lineIndex <= fold.endIndex) {
+        return fold.startIndex;
+      }
+    }
+    return null;
+  }
+
+  FoldRange? _getFoldRangeAtCurrentLine(int lineIndex) {
+    try {
+      return _controller.foldings.firstWhere((f) => f.startIndex == lineIndex);
+    } catch (_) {
+      return null;
     }
   }
 
@@ -2217,6 +2287,7 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
   Offset? _pointerDownPosition;
   Offset _currentPosition = Offset.zero;
   bool _foldRangesNeedsClear = false;
+  bool _isFoldToggleInProgress = false;
   bool _selectionActive = false, _isDragging = false;
   bool _draggingStartHandle = false, _draggingEndHandle = false;
   bool _showBubble = false, _draggingCHandle = false;
@@ -2402,6 +2473,14 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
     });
     caretBlinkController.addListener(markNeedsPaint);
     controller.addListener(_onControllerChange);
+
+    if (enableFolding) {
+      controller.setFoldCallbacks(
+        toggleFold: _toggleFoldAtLine,
+        foldAll: _foldAllRanges,
+        unfoldAll: _unfoldAllRanges,
+      );
+    }
 
     hoverNotifier.addListener(() {
       if (hoverNotifier.value == null) {
@@ -2667,7 +2746,9 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
 
     if (controller.selectionOnly) {
       controller.selectionOnly = false;
-      _ensureCaretVisible();
+      if (!_isFoldToggleInProgress) {
+        _ensureCaretVisible();
+      }
 
       if (isMobile && controller.selection.isCollapsed) {
         _showBubble = true;
@@ -2678,7 +2759,9 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
 
     if (controller.bufferNeedsRepaint) {
       controller.bufferNeedsRepaint = false;
-      _ensureCaretVisible();
+      if (!_isFoldToggleInProgress) {
+        _ensureCaretVisible();
+      }
       markNeedsPaint();
       return;
     }
@@ -2809,7 +2892,13 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
         aiOffsetNotifier.value = null;
       }
     }
-    _ensureCaretVisible();
+
+    if (focusNode.hasFocus &&
+        !_isFoldToggleInProgress &&
+        _lastProcessedText != newText) {
+      _ensureCaretVisible();
+    }
+
     if (_lastProcessedText == newText) return;
     _lastProcessedText = newText;
   }
@@ -2878,13 +2967,79 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
   }
 
   void _toggleFold(FoldRange fold) {
+    _isFoldToggleInProgress = true;
     if (fold.isFolded) {
       _unfoldWithChildren(fold);
     } else {
       _foldWithChildren(fold);
     }
+
+    controller.foldings = List.from(_foldRanges);
     markNeedsLayout();
     markNeedsPaint();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _isFoldToggleInProgress = false;
+    });
+  }
+
+  void _toggleFoldAtLine(int lineNumber) {
+    if (!enableFolding) return;
+    if (lineNumber < 0 || lineNumber >= controller.lineCount) return;
+
+    final foldRange = _getFoldRangeAtLine(lineNumber);
+    if (foldRange != null) {
+      _toggleFold(foldRange);
+    }
+  }
+
+  void _foldAllRanges() {
+    if (!enableFolding) return;
+    _isFoldToggleInProgress = true;
+
+    for (int i = 0; i < controller.lineCount; i++) {
+      _getOrComputeFoldRange(i);
+    }
+
+    for (final fold in _foldRanges) {
+      if (!fold.isFolded) {
+        final isNested = _foldRanges.any(
+          (other) =>
+              other != fold &&
+              other.startIndex < fold.startIndex &&
+              other.endIndex >= fold.endIndex,
+        );
+        if (!isNested) {
+          _foldWithChildren(fold);
+        }
+      }
+    }
+
+    controller.foldings = List.from(_foldRanges);
+    markNeedsLayout();
+    markNeedsPaint();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _isFoldToggleInProgress = false;
+    });
+  }
+
+  void _unfoldAllRanges() {
+    if (!enableFolding) return;
+    _isFoldToggleInProgress = true;
+
+    for (final fold in _foldRanges) {
+      if (fold.isFolded) {
+        fold.isFolded = false;
+        fold.clearOriginallyFoldedChildren();
+      }
+    }
+
+    controller.foldings = List.from(_foldRanges);
+    markNeedsLayout();
+    markNeedsPaint();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _isFoldToggleInProgress = false;
+    });
   }
 
   void _foldWithChildren(FoldRange parentFold) {
@@ -3338,6 +3493,15 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
       hasActiveFolds,
     );
 
+    _drawFoldedLineHighlights(
+      canvas,
+      offset,
+      firstVisibleLine,
+      lastVisibleLine,
+      firstVisibleLineY,
+      hasActiveFolds,
+    );
+
     _drawSelection(
       canvas,
       offset,
@@ -3686,7 +3850,7 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
       );
     }
 
-    final lineNumberStyle =
+    final baseLineNumberStyle =
         gutterStyle.lineNumberStyle ??
         (() {
           if (gutterTextStyle == null) {
@@ -3699,6 +3863,48 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
         })();
 
     final hasActiveFolds = _foldRanges.any((f) => f.isFolded);
+    final cursorOffset = controller.selection.extentOffset;
+    final currentLine = controller.getLineAtOffset(cursorOffset);
+    final selection = controller.selection;
+    int? selectionStartLine;
+    int? selectionEndLine;
+    if (selection.start != selection.end) {
+      selectionStartLine = controller.getLineAtOffset(selection.start);
+      selectionEndLine = controller.getLineAtOffset(selection.end);
+
+      if (selectionStartLine > selectionEndLine) {
+        final temp = selectionStartLine;
+        selectionStartLine = selectionEndLine;
+        selectionEndLine = temp;
+      }
+    }
+
+    final Map<int, int> lineSeverityMap = {};
+    for (final diagnostic in _diagnostics) {
+      final startLine = diagnostic.range['start']?['line'] as int?;
+      final endLine = diagnostic.range['end']?['line'] as int?;
+      if (startLine != null) {
+        final severity = diagnostic.severity;
+        if (severity == 1 || severity == 2) {
+          final rangeEnd = endLine ?? startLine;
+          for (int line = startLine; line <= rangeEnd; line++) {
+            final existing = lineSeverityMap[line];
+            if (existing == null || severity < existing) {
+              lineSeverityMap[line] = severity;
+            }
+          }
+        }
+      }
+    }
+
+    final activeLineColor =
+        gutterStyle.activeLineNumberColor ??
+        (baseLineNumberStyle?.color ?? Colors.white);
+    final inactiveLineColor =
+        gutterStyle.inactiveLineNumberColor ??
+        (baseLineNumberStyle?.color?.withAlpha(120) ?? Colors.grey);
+    final errorColor = gutterStyle.errorLineNumberColor;
+    final warningColor = gutterStyle.warningLineNumberColor;
 
     int firstVisibleLine;
     double firstVisibleLineY;
@@ -3736,9 +3942,30 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
       if (contentTop > viewBottom) break;
 
       if (contentTop + lineHeight >= viewTop) {
+        Color lineNumberColor;
+        final severity = lineSeverityMap[i];
+        if (severity == 1) {
+          lineNumberColor = errorColor;
+        } else if (severity == 2) {
+          lineNumberColor = warningColor;
+        } else if (i == currentLine) {
+          lineNumberColor = activeLineColor;
+        } else if (selectionStartLine != null &&
+            selectionEndLine != null &&
+            i >= selectionStartLine &&
+            i <= selectionEndLine) {
+          lineNumberColor = activeLineColor;
+        } else {
+          lineNumberColor = inactiveLineColor;
+        }
+
+        final lineNumberStyle = baseLineNumberStyle!.copyWith(
+          color: lineNumberColor,
+        );
+
         final lineNumPara = _buildLineNumberParagraph(
           (i + 1).toString(),
-          lineNumberStyle!,
+          lineNumberStyle,
         );
         final numWidth = lineNumPara.longestLine;
 
@@ -4424,6 +4651,56 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
     }
   }
 
+  void _drawFoldedLineHighlights(
+    Canvas canvas,
+    Offset offset,
+    int firstVisibleLine,
+    int lastVisibleLine,
+    double firstVisibleLineY,
+    bool hasActiveFolds,
+  ) {
+    if (!hasActiveFolds) return;
+
+    final highlightColor =
+        gutterStyle.foldedLineHighlightColor ??
+        selectionStyle.selectionColor.withAlpha(60);
+
+    final highlightPaint = Paint()
+      ..color = highlightColor
+      ..style = PaintingStyle.fill;
+
+    for (final foldRange in _foldRanges) {
+      if (!foldRange.isFolded) continue;
+
+      final foldStartLine = foldRange.startIndex;
+
+      if (foldStartLine < firstVisibleLine || foldStartLine > lastVisibleLine) {
+        continue;
+      }
+
+      final lineY = _getLineYOffset(foldStartLine, hasActiveFolds);
+      final lineHeight = lineWrap
+          ? _getWrappedLineHeight(foldStartLine)
+          : _lineHeight;
+
+      final screenY =
+          offset.dy +
+          (innerPadding?.top ?? 0) +
+          lineY -
+          vscrollController.offset;
+
+      canvas.drawRect(
+        Rect.fromLTWH(
+          offset.dx + _gutterWidth,
+          screenY,
+          size.width - _gutterWidth,
+          lineHeight,
+        ),
+        highlightPaint,
+      );
+    }
+  }
+
   void _drawSelection(
     Canvas canvas,
     Offset offset,
@@ -5071,21 +5348,31 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
   @override
   MouseCursor get cursor {
     if (_currentPosition.dx >= 0 && _currentPosition.dx < _gutterWidth) {
-      final hasActiveFolds = _foldRanges.any((f) => f.isFolded);
-      for (final fold in _foldRanges) {
-        if (fold.startIndex >= controller.lineCount) continue;
-        final foldY =
-            _getLineYOffset(fold.startIndex, hasActiveFolds) +
-            (innerPadding?.top ?? 0) -
-            vscrollController.offset;
-        final lineHeight = lineWrap
-            ? _getWrappedLineHeight(fold.startIndex)
-            : _lineHeight;
-        if (_currentPosition.dy >= foldY &&
-            _currentPosition.dy <= foldY + lineHeight) {
-          return SystemMouseCursors.click;
-        }
+      if (_foldRanges.isEmpty && !enableFolding) {
+        return MouseCursor.defer;
       }
+
+      final clickY =
+          _currentPosition.dy +
+          vscrollController.offset -
+          (innerPadding?.top ?? 0);
+      final hasActiveFolds = _foldRanges.any((f) => f.isFolded);
+
+      int hoveredLine;
+      if (!hasActiveFolds && !lineWrap) {
+        hoveredLine = (clickY / _lineHeight).floor().clamp(
+          0,
+          controller.lineCount - 1,
+        );
+      } else {
+        hoveredLine = _findVisibleLineByYPosition(clickY);
+      }
+
+      final foldRange = _getFoldRangeAtLine(hoveredLine);
+      if (foldRange != null) {
+        return SystemMouseCursors.click;
+      }
+
       return MouseCursor.defer;
     }
     return SystemMouseCursors.text;

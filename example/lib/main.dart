@@ -67,11 +67,6 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       home: Scaffold(
-        floatingActionButton: FloatingActionButton(
-          onPressed: (){
-            _controller.foldAll();
-          }
-        ),
         body: SafeArea(
           child: FutureBuilder<LspConfig>(
             future: getLsp(),
