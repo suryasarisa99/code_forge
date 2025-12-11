@@ -32,7 +32,7 @@
 ---
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/heckmon/code_forge/refs/heads/main/gifs/code_forge_100k.gif?token=GHSAT0AAAAAADG255TYTX7TQIP7DUNCMHE62J2L74Q" alt="CodeForge Demo" width="800"/><sub>large code support (tested with 100k+ lines) and LSP based intelligent lazy highlighting</sub>
+  <img src="https://raw.githubusercontent.com/heckmon/code_forge/refs/heads/main/gifs/code_forge_100k.gif?token=GHSAT0AAAAAADG255TYTX7TQIP7DUNCMHE62J2L74Q" alt="CodeForge Demo" width="800"/><sub><br>large code support (tested with 100k+ lines) and LSP based intelligent lazy highlighting</sub>
 </p>
 
 ## ✨ Why CodeForge?
@@ -209,9 +209,8 @@ Connect to any Language Server Protocol compatible server for intelligent code a
 
 CodeForge provides a built-in LSP client that allows you to connect to any LSP server for intelligent highlighting, completions, hover details, diagnostics, and more.
 
-> [!NOTE]
->
-> If you're using the LSP, you must provide a valid `filePath` to the `filePath` parameter of  the `CodeForge` widget. Also The `filePath` provided in both the `CodeForge` widget and the `LspConfig` class must be the same. Otherwise, an exception will be thrown.
+> [!WARNING]
+> If you're using the LSP, you must provide a valid `filePath` to the `filePath` parameter of the `CodeForge` widget. Also The `filePath` provided in both the `CodeForge` widget and the `LspConfig` class must be the same. Otherwise, an exception will be thrown.
 
 ## Types
 #### There are two ways to configure LSP client with code crafter:
