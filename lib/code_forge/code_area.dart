@@ -790,108 +790,6 @@ class _CodeForgeState extends State<CodeForge>
     _resetCursorBlink();
   }
 
-  void _indent() {
-    if (_controller.selection.baseOffset !=
-        _controller.selection.extentOffset) {
-      final selection = _controller.selection;
-      final text = _controller.text;
-      final selStart = selection.start;
-      final selEnd = selection.end;
-
-      final lineStart = text.lastIndexOf('\n', selStart - 1) + 1;
-      int lineEnd = text.indexOf('\n', selEnd);
-      if (lineEnd == -1) lineEnd = text.length;
-
-      final selectedBlock = text.substring(lineStart, lineEnd);
-      final indentedBlock = selectedBlock
-          .split('\n')
-          .map((line) => '   $line')
-          .join('\n');
-
-      final lines = selectedBlock.split('\n');
-      final addedChars = 3 * lines.length;
-      final newSelection = TextSelection(
-        baseOffset: selection.baseOffset + 3,
-        extentOffset: selection.extentOffset + addedChars,
-      );
-
-      _controller.replaceRange(lineStart, lineEnd, indentedBlock);
-      _controller.setSelectionSilently(newSelection);
-    } else {
-      _controller.insertAtCurrentCursor('   ');
-    }
-  }
-
-  void _unindent() {
-    final selection = _controller.selection;
-    final text = _controller.text;
-
-    if (selection.baseOffset != selection.extentOffset) {
-      final selStart = selection.start;
-      final selEnd = selection.end;
-
-      final lineStart = text.lastIndexOf('\n', selStart - 1) + 1;
-      int lineEnd = text.indexOf('\n', selEnd);
-      if (lineEnd == -1) lineEnd = text.length;
-
-      final selectedBlock = text.substring(lineStart, lineEnd);
-      final unindentedBlock = selectedBlock
-          .split('\n')
-          .map(
-            (line) => line.startsWith('   ')
-                ? line.substring(3)
-                : line.replaceFirst(RegExp(r'^ +'), ''),
-          )
-          .join('\n');
-
-      final lines = selectedBlock.split('\n');
-      int removedChars = 0;
-      for (final line in lines) {
-        if (line.startsWith('   ')) {
-          removedChars += 3;
-        } else {
-          removedChars += RegExp(r'^ +').stringMatch(line)?.length ?? 0;
-        }
-      }
-
-      final newSelection = TextSelection(
-        baseOffset:
-            selection.baseOffset -
-            (lines.first.startsWith('   ')
-                ? 3
-                : (RegExp(r'^ +').stringMatch(lines.first)?.length ?? 0)),
-        extentOffset: selection.extentOffset - removedChars,
-      );
-
-      _controller.replaceRange(lineStart, lineEnd, unindentedBlock);
-      _controller.setSelectionSilently(newSelection);
-    } else {
-      final caret = selection.start;
-      final prevNewline = text.lastIndexOf('\n', caret - 1);
-      final lineStart = prevNewline == -1 ? 0 : prevNewline + 1;
-      final nextNewline = text.indexOf('\n', caret);
-      final lineEnd = nextNewline == -1 ? text.length : nextNewline;
-      final line = text.substring(lineStart, lineEnd);
-
-      int removeCount = 0;
-      if (line.startsWith('   ')) {
-        removeCount = 3;
-      } else {
-        removeCount = RegExp(r'^ +').stringMatch(line)?.length ?? 0;
-      }
-
-      final newLine = line.substring(removeCount);
-      final newOffset = caret - removeCount > lineStart
-          ? caret - removeCount
-          : lineStart;
-
-      _controller.replaceRange(lineStart, lineEnd, newLine);
-      _controller.setSelectionSilently(
-        TextSelection.collapsed(offset: newOffset),
-      );
-    }
-  }
-
   void _deleteWordBackward() {
     if (widget.readOnly) return;
     final selection = _controller.selection;
@@ -1386,7 +1284,7 @@ class _CodeForgeState extends State<CodeForge>
                                             if (widget.readOnly) {
                                               return KeyEventResult.handled;
                                             }
-                                            _unindent();
+                                            _controller.unindent();
                                             _commonKeyFunctions();
                                             return KeyEventResult.handled;
                                           case LogicalKeyboardKey.arrowLeft:
@@ -1519,7 +1417,7 @@ class _CodeForgeState extends State<CodeForge>
                                           } else if (_suggestionNotifier
                                                   .value ==
                                               null) {
-                                            _indent();
+                                            _controller.indent();
                                             _commonKeyFunctions();
                                           }
                                           return KeyEventResult.handled;

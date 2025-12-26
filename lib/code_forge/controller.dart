@@ -1061,6 +1061,23 @@ class CodeForgeController implements DeltaTextInputClient {
     notifyListeners();
   }
 
+  /// Search the document for occurrences of [word] and add highlight ranges.
+  ///
+  /// - `word`: The substring to search for. If empty, existing highlights
+  ///   are cleared and listeners are notified.
+  /// - `highlightStyle`: Optional style applied to each found match. If null,
+  ///   a default amber background style is used.
+  /// - `matchCase`: When true the search is case-sensitive; otherwise the
+  ///   search is performed case-insensitively.
+  /// - `matchWholeWord`: When true matches are considered valid only when the
+  ///   matched substring is not adjacent to other word characters (letters,
+  ///   digits, or underscore).
+  ///
+  /// Behavior:
+  /// Clears existing `searchHighlights`, scans the document for matches
+  /// according to the provided options, appends a `SearchHighlight` for each
+  /// match, sets `searchHighlightsChanged = true` and calls
+  /// `notifyListeners()` to request a repaint/update.
   void findWord(
     String word, {
     TextStyle? highlightStyle,
@@ -1117,6 +1134,19 @@ class CodeForgeController implements DeltaTextInputClient {
     notifyListeners();
   }
 
+  /// Search the document using a regular expression and add highlight ranges
+  /// for each match.
+  ///
+  /// - `regex`: The regular expression used to find matches in the current
+  ///   document text. All matches returned by `regex.allMatches` are added as
+  ///   highlights.
+  /// - `highlightStyle`: Optional `TextStyle` applied to each match. If null,
+  ///   a default amber background style is used.
+  ///
+  /// Behavior:
+  /// Clears existing `searchHighlights`, applies [regex] to the document
+  /// text, appends a `SearchHighlight` for every match and then sets
+  /// `searchHighlightsChanged = true` and calls `notifyListeners()`.
   void findRegex(RegExp regex, TextStyle? highlightStyle) {
     final style =
         highlightStyle ?? const TextStyle(backgroundColor: Colors.amberAccent);
@@ -1134,6 +1164,120 @@ class CodeForgeController implements DeltaTextInputClient {
 
     searchHighlightsChanged = true;
     notifyListeners();
+  }
+
+  /// Indent the current selection or insert an indent at the caret.
+  ///
+  /// If a range is selected, each line in the selected block is prefixed
+  /// with three spaces. The selection is adjusted to account for the added
+  /// characters. If there is no selection (collapsed caret), three spaces
+  /// are inserted at the caret position.
+  ///
+  /// The method uses `replaceRange` and `setSelectionSilently` to update the
+  /// document and selection without triggering external selection side
+  /// effects.
+  void indent() {
+    if (selection.baseOffset != selection.extentOffset) {
+      final selStart = selection.start;
+      final selEnd = selection.end;
+
+      final lineStart = text.lastIndexOf('\n', selStart - 1) + 1;
+      int lineEnd = text.indexOf('\n', selEnd);
+      if (lineEnd == -1) lineEnd = text.length;
+
+      final selectedBlock = text.substring(lineStart, lineEnd);
+      final indentedBlock = selectedBlock
+          .split('\n')
+          .map((line) => '   $line')
+          .join('\n');
+
+      final lines = selectedBlock.split('\n');
+      final addedChars = 3 * lines.length;
+      final newSelection = TextSelection(
+        baseOffset: selection.baseOffset + 3,
+        extentOffset: selection.extentOffset + addedChars,
+      );
+
+      replaceRange(lineStart, lineEnd, indentedBlock);
+      setSelectionSilently(newSelection);
+    } else {
+      insertAtCurrentCursor('   ');
+    }
+  }
+
+  /// Remove indentation from the current selection or the current line.
+  ///
+  /// If a range is selected, the method attempts to remove up to three
+  /// leading spaces from each line in the selection (or removes the leading
+  /// contiguous spaces if fewer than three). The selection is adjusted to
+  /// reflect the removed characters. If there is no selection, the current
+  /// line is unindented and the caret is moved appropriately.
+  ///
+  /// Uses `replaceRange` and `setSelectionSilently` to update the document
+  /// and selection without causing external selection side effects.
+  void unindent() {
+    if (selection.baseOffset != selection.extentOffset) {
+      final selStart = selection.start;
+      final selEnd = selection.end;
+
+      final lineStart = text.lastIndexOf('\n', selStart - 1) + 1;
+      int lineEnd = text.indexOf('\n', selEnd);
+      if (lineEnd == -1) lineEnd = text.length;
+
+      final selectedBlock = text.substring(lineStart, lineEnd);
+      final unindentedBlock = selectedBlock
+          .split('\n')
+          .map(
+            (line) => line.startsWith('   ')
+                ? line.substring(3)
+                : line.replaceFirst(RegExp(r'^ +'), ''),
+          )
+          .join('\n');
+
+      final lines = selectedBlock.split('\n');
+      int removedChars = 0;
+      for (final line in lines) {
+        if (line.startsWith('   ')) {
+          removedChars += 3;
+        } else {
+          removedChars += RegExp(r'^ +').stringMatch(line)?.length ?? 0;
+        }
+      }
+
+      final newSelection = TextSelection(
+        baseOffset:
+            selection.baseOffset -
+            (lines.first.startsWith('   ')
+                ? 3
+                : (RegExp(r'^ +').stringMatch(lines.first)?.length ?? 0)),
+        extentOffset: selection.extentOffset - removedChars,
+      );
+
+      replaceRange(lineStart, lineEnd, unindentedBlock);
+      setSelectionSilently(newSelection);
+    } else {
+      final caret = selection.start;
+      final prevNewline = text.lastIndexOf('\n', caret - 1);
+      final lineStart = prevNewline == -1 ? 0 : prevNewline + 1;
+      final nextNewline = text.indexOf('\n', caret);
+      final lineEnd = nextNewline == -1 ? text.length : nextNewline;
+      final line = text.substring(lineStart, lineEnd);
+
+      int removeCount = 0;
+      if (line.startsWith('   ')) {
+        removeCount = 3;
+      } else {
+        removeCount = RegExp(r'^ +').stringMatch(line)?.length ?? 0;
+      }
+
+      final newLine = line.substring(removeCount);
+      final newOffset = caret - removeCount > lineStart
+          ? caret - removeCount
+          : lineStart;
+
+      replaceRange(lineStart, lineEnd, newLine);
+      setSelectionSilently(TextSelection.collapsed(offset: newOffset));
+    }
   }
 
   /// Clear all search highlights

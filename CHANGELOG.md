@@ -139,3 +139,6 @@ This release establishes **CodeForge** as a powerful, production-ready code edit
 ## 2.0.0
 - REFACTOR: Moved the LSP configuration and logic from the `CodeForge` to the `CodeForgeController`.
 - FIX: Code action persists on mobile.
+
+## 2.1.0
+- FEATURE: Added more public APIs in the `CodeForgeController`.
