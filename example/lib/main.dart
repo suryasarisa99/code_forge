@@ -54,8 +54,6 @@ class _MyAppState extends State<MyApp> {
                 return const Center(child: Text("Failed to load LSP"));
               }
 
-              // Initialize controllers if not already (or if config changed, though unlikely here)
-              // Ideally we'd do this cleaner, but for a quick verified test inside FutureBuilder:
               final lspConfig = snapshot.data!;
               if (codeController == null ||
                   codeController!.lspConfig != lspConfig) {
