@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:example/finder.dart';
 import 'package:path/path.dart' as p;
 import 'package:code_forge/code_forge.dart';
 import 'package:flutter/material.dart';
@@ -20,8 +21,6 @@ class _MyAppState extends State<MyApp> {
   final undoController = UndoRedoController();
   final absFilePath = p.join(Directory.current.path, "lib/example_code.dart");
   CodeForgeController? codeController;
-  FindController? findController;
-  final replaceController = TextEditingController();
 
   Future<LspConfig> getLsp() async {
     final absWorkspacePath = p.join(Directory.current.path, "lib");
@@ -59,141 +58,24 @@ class _MyAppState extends State<MyApp> {
               if (codeController == null ||
                   codeController!.lspConfig != lspConfig) {
                 codeController = CodeForgeController(lspConfig: lspConfig);
-                findController = FindController(codeController!);
               }
 
-              return Column(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(8.0),
-                    color: Colors.grey[200],
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Row(
-                          children: [
-                            const Icon(Icons.search),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: TextField(
-                                decoration: const InputDecoration(
-                                  hintText: 'Find...',
-                                  border: InputBorder.none,
-                                ),
-                                onChanged: (val) => findController?.find(val),
-                              ),
-                            ),
-                            ListenableBuilder(
-                              listenable: findController!,
-                              builder: (context, _) {
-                                return Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    findController?.currentMatchIndex == -1
-                                        ? Text(
-                                            "No Results",
-                                            style: TextStyle(color: Colors.red),
-                                          )
-                                        : Text(
-                                            "${findController!.currentMatchIndex + 1}/${findController!.matchCount}",
-                                          ),
-                                    IconButton(
-                                      icon: const Icon(Icons.abc),
-                                      color: findController!.caseSensitive
-                                          ? Colors.blue
-                                          : Colors.grey,
-                                      onPressed: () =>
-                                          findController!.caseSensitive =
-                                              !findController!.caseSensitive,
-                                      tooltip: 'Match Case',
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.text_fields),
-                                      color: findController!.matchWholeWord
-                                          ? Colors.blue
-                                          : Colors.grey,
-                                      onPressed: () =>
-                                          findController!.matchWholeWord =
-                                              !findController!.matchWholeWord,
-                                      tooltip: 'Match Whole Word',
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.code),
-                                      color: findController!.isRegex
-                                          ? Colors.blue
-                                          : Colors.grey,
-                                      onPressed: () => findController!.isRegex =
-                                          !findController!.isRegex,
-                                      tooltip: 'Regex',
-                                    ),
-                                  ],
-                                );
-                              },
-                            ),
-                            const SizedBox(width: 8),
-                            IconButton(
-                              icon: const Icon(Icons.keyboard_arrow_up),
-                              onPressed: () => findController?.previous(),
-                              tooltip: 'Previous',
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.keyboard_arrow_down),
-                              onPressed: () => findController?.next(),
-                              tooltip: 'Next',
-                            ),
-                          ],
-                        ),
-                        const Divider(),
-                        Row(
-                          children: [
-                            const Icon(Icons.edit_note),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: TextField(
-                                controller: replaceController,
-                                decoration: const InputDecoration(
-                                  hintText: 'Replace...',
-                                  border: InputBorder.none,
-                                ),
-                              ),
-                            ),
-                            TextButton(
-                              onPressed: () {
-                                findController?.replace(replaceController.text);
-                              },
-                              child: const Text('Replace'),
-                            ),
-                            TextButton(
-                              onPressed: () {
-                                findController?.replaceAll(
-                                  replaceController.text,
-                                );
-                              },
-                              child: const Text('All'),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
+              return CodeForge(
+                undoController: undoController,
+                language: langDart,
+                controller: codeController,
+                textStyle: GoogleFonts.jetBrainsMono(),
+                filePath: absFilePath,
+                matchHighlightStyle: const MatchHighlightStyle(
+                  currentMatchStyle: TextStyle(
+                    backgroundColor: Color(0xFFFFA726),
                   ),
-                  Expanded(
-                    child: CodeForge(
-                      undoController: undoController,
-                      language: langDart,
-                      controller: codeController,
-                      textStyle: GoogleFonts.jetBrainsMono(),
-                      filePath: absFilePath,
-                      matchHighlightStyle: const MatchHighlightStyle(
-                        currentMatchStyle: TextStyle(
-                          backgroundColor: Color(0xFFFFA726),
-                        ),
-                        otherMatchStyle: TextStyle(
-                          backgroundColor: Color(0x55FFFF00),
-                        ),
-                      ),
-                    ),
+                  otherMatchStyle: TextStyle(
+                    backgroundColor: Color(0x55FFFF00),
                   ),
-                ],
+                ),
+                finderBuilder: (c, controller) =>
+                    FindPanelView(controller: controller),
               );
             },
           ),
