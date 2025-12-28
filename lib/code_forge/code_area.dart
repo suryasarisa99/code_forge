@@ -1291,30 +1291,23 @@ class _CodeForgeState extends State<CodeForge>
                                                         HardwareKeyboard
                                                             .instance
                                                             .isAltPressed;
-                                                    if (_findController !=
-                                                        null) {
-                                                      _findController!
-                                                              .isActive =
-                                                          true;
-                                                      _findController!
-                                                              .isReplaceMode =
-                                                          isAlt;
-                                                    }
+
+                                                    _findController.isActive =
+                                                        true;
+                                                    _findController
+                                                            .isReplaceMode =
+                                                        isAlt;
                                                     return KeyEventResult
                                                         .handled;
                                                   case LogicalKeyboardKey.keyH:
                                                     if (!HardwareKeyboard
                                                         .instance
                                                         .isMetaPressed) {
-                                                      if (_findController !=
-                                                          null) {
-                                                        _findController!
-                                                                .isActive =
-                                                            true;
-                                                        _findController!
-                                                                .isReplaceMode =
-                                                            true;
-                                                      }
+                                                      _findController.isActive =
+                                                          true;
+                                                      _findController
+                                                              .isReplaceMode =
+                                                          true;
                                                       return KeyEventResult
                                                           .handled;
                                                     }
@@ -1598,10 +1591,10 @@ class _CodeForgeState extends State<CodeForge>
                                                   _suggestionNotifier.value =
                                                       null;
                                                   _hoverNotifier.value = null;
-                                                  _findController?.isActive =
+                                                  _findController.isActive =
                                                       false;
                                                   _findController
-                                                          ?.isReplaceMode =
+                                                          .isReplaceMode =
                                                       false;
                                                   return KeyEventResult.handled;
 
