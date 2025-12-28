@@ -16,15 +16,27 @@ class FindController extends ChangeNotifier {
   bool _caseSensitive = false;
   bool _matchWholeWord = false;
   String _lastQuery = '';
+  bool _isActive = false;
+  bool _isReplaceMode = false;
 
   String _lastText = '';
   VoidCallback? _controllerListener;
+
+  final TextEditingController findInputController = TextEditingController();
+  final TextEditingController replaceInputController = TextEditingController();
+  final FocusNode findInputFocusNode = FocusNode();
+  final FocusNode replaceInputFocusNode = FocusNode();
 
   /// Creates a [FindController] associated with the given [CodeForgeController].
   FindController(this._codeController) {
     _lastText = _codeController.text;
     _controllerListener = _onCodeControllerChanged;
     _codeController.addListener(_controllerListener!);
+    findInputController.addListener(_onFindInputChanged);
+  }
+
+  void _onFindInputChanged() {
+    find(findInputController.text);
   }
 
   @override
@@ -32,6 +44,9 @@ class FindController extends ChangeNotifier {
     if (_controllerListener != null) {
       _codeController.removeListener(_controllerListener!);
     }
+    findInputController.removeListener(_onFindInputChanged);
+    findInputController.dispose();
+    replaceInputController.dispose();
     super.dispose();
   }
 
@@ -58,6 +73,12 @@ class FindController extends ChangeNotifier {
   /// Whether the search matches whole words only.
   bool get matchWholeWord => _matchWholeWord;
 
+  /// Whether the finder is currently active/visible.
+  bool get isActive => _isActive;
+
+  /// Whether the replace mode is active.
+  bool get isReplaceMode => _isReplaceMode;
+
   /// Sets the case sensitivity of the search.
   set caseSensitive(bool value) {
     if (_caseSensitive == value) return;
@@ -80,6 +101,49 @@ class FindController extends ChangeNotifier {
     _matchWholeWord = value;
     _reperformSearch();
     notifyListeners();
+  }
+
+  /// Sets whether the finder is currently active/visible.
+  set isActive(bool value) {
+    if (_isActive == value) return;
+    _isActive = value;
+    if (_isActive) {
+      // Small delay to ensure widget is built before focusing, prevents focus to replace input.
+      Future.microtask(() => findInputFocusNode.requestFocus());
+      if (_lastQuery.isNotEmpty) {
+        _reperformSearch();
+      }
+    } else {
+      _clearMatches();
+    }
+    notifyListeners();
+  }
+
+  /// Sets whether the replace mode is active.
+  set isReplaceMode(bool value) {
+    if (_isReplaceMode == value) return;
+    _isReplaceMode = value;
+    notifyListeners();
+  }
+
+  void toggleReplaceMode() {
+    isReplaceMode = !isReplaceMode;
+  }
+
+  void toggleActive() {
+    isActive = !isActive;
+  }
+
+  void toggleCaseSensitive() {
+    caseSensitive = !caseSensitive;
+  }
+
+  void toggleRegex() {
+    isRegex = !isRegex;
+  }
+
+  void toggleMatchWholeWord() {
+    matchWholeWord = !matchWholeWord;
   }
 
   void _reperformSearch() {
@@ -191,12 +255,16 @@ class FindController extends ChangeNotifier {
     _clearMatches();
   }
 
-  /// Replaces the currently selected match with [replacement].
-  void replace(String replacement) {
+  /// Replaces the currently selected match with the text in [replaceInputController].
+  void replace() {
     if (_currentMatchIndex < 0 || _currentMatchIndex >= _matches.length) return;
 
     final match = _matches[_currentMatchIndex];
-    _codeController.replaceRange(match.start, match.end, replacement);
+    _codeController.replaceRange(
+      match.start,
+      match.end,
+      replaceInputController.text,
+    );
 
     // After replacement, offsets change, so we must re-search.
     // We want to move to the 'next' match relative to where we were.
@@ -214,8 +282,8 @@ class FindController extends ChangeNotifier {
     // Since replaceRange puts cursor at end of replacement, find() should select the next one.
   }
 
-  /// Replaces all matches with [replacement].
-  void replaceAll(String replacement) {
+  /// Replaces all matches with the text in [replaceInputController].
+  void replaceAll() {
     if (_matches.isEmpty) return;
 
     // We use the regex/string logic to generate the new text
@@ -235,7 +303,7 @@ class FindController extends ChangeNotifier {
 
     try {
       final regExp = RegExp(pattern, caseSensitive: _caseSensitive);
-      final newText = text.replaceAll(regExp, replacement);
+      final newText = text.replaceAll(regExp, replaceInputController.text);
 
       // Replace the entire document content
       _codeController.replaceRange(0, text.length, newText);
@@ -268,6 +336,9 @@ class FindController extends ChangeNotifier {
       // We explicitly set selectionOnly to true to force scroll to cursor
       _codeController.selectionOnly = true;
       _codeController.notifyListeners();
+
+      // removes selection
+      _codeController.setSelectionSilently(TextSelection.collapsed(offset: 0));
     }
   }
 
