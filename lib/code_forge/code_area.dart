@@ -5576,6 +5576,12 @@ class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation {
           _selectWordAtOffset(textOffset);
         });
       } else {
+        _dtap.addPointer(event);
+        _dtap.onDoubleTap = () {
+          _selectWordAtOffset(textOffset);
+          // contextMenuOffsetNotifier.value = localPosition;
+        };
+
         _dragStartOffset = textOffset;
         _onetap.onTap = () {
           if (suggestionNotifier.value != null) {
